@@ -57,6 +57,16 @@ def _build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="report what the runtime currently holds")
     status.add_argument("--json", action="store_true")
 
+    serve_cmd = sub.add_parser("serve", help="run the read-only Control API and dashboard")
+    serve_cmd.add_argument("bundle", type=Path)
+    serve_cmd.add_argument("--host", default="127.0.0.1", help="default: loopback only")
+    serve_cmd.add_argument("--port", type=int, default=8787)
+    serve_cmd.add_argument(
+        "--token",
+        default="",
+        help="bearer token; required to bind anything other than loopback",
+    )
+
     return parser
 
 
@@ -118,6 +128,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             for agent in agents:
                 owner = "nova" if agent.managed_by_nova else "not nova-managed"
                 print(f"  {agent.agent_id:22} {owner}")
+            return 0
+
+        if args.command == "serve":
+            from nova.control import ControlAPI, serve
+
+            bundle = load_bundle(args.bundle)
+            runtime = get_runtime(args.runtime, home=args.home, tenant_id=bundle.tenant_id)
+            api = ControlAPI(bundle, runtime)
+            serve(
+                api,
+                host=args.host,
+                port=args.port,
+                token=args.token,
+                ready=lambda url: print(f"{bundle.identity.product_name} control plane: {url}"),
+            )
             return 0
 
         # plan / apply both load a bundle and drive the same code path.

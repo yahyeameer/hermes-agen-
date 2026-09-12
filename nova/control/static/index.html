@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Control</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header>
+  <div class="head">
+    <div class="brand">
+      <img id="logo" alt="" hidden>
+      <div>
+        <h1 id="product">Loading…</h1>
+        <div class="co" id="company"></div>
+      </div>
+    </div>
+    <div class="headmeta">
+      <div id="tenant"></div>
+      <div id="health"></div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div id="banner" class="banner" hidden></div>
+
+  <div class="stats" id="stats"></div>
+
+  <section>
+    <div class="sechead"><h2>Agents</h2><span class="count" id="agent-count"></span></div>
+    <div id="agents"></div>
+  </section>
+
+  <section>
+    <div class="sechead"><h2>Tasks</h2><span class="count" id="task-count"></span></div>
+    <div id="tasks"></div>
+  </section>
+
+  <footer>
+    <span id="support"></span>
+    <span>Read-only control plane</span>
+    <span id="version"></span>
+  </footer>
+</div>
+
+<script src="/app.js"></script>
+</body>
+</html>

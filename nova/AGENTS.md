@@ -88,6 +88,19 @@ import for OS detection, breaking `platform.system()` everywhere. That is why th
 package is `nova/`. `scripts/check_protected_identifiers.py` fails if `platform/__init__.py`
 reappears.
 
+## The dashboard talks only to the Control API
+
+`nova/control/static/app.js` may fetch `/platform/v1/*` and nothing else. It must never
+learn a runtime path, profile directory or table name. `tests/platform/test_control_server.py`
+parses the file and fails on any fetch that bypasses the API prefix.
+
+API data is inserted with `textContent`, never as markup — task titles and agent names are
+customer-controlled strings. The Control API is read-only: write methods are refused with
+405 before any handler runs. Do not add a write route without the policy layer underneath it.
+
+Status colours are reserved semantics, never themed. A customer's accent must not repaint
+"blocked".
+
 ## Tests
 
 Platform tests live under `tests/platform/`. Do not modify existing upstream tests — 3,991 files

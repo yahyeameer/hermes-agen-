@@ -55,6 +55,80 @@ class RuntimeCapabilities:
         return [name for name in required if not getattr(self, name, False)]
 
 
+#: NOVA's canonical work states. Deliberately a small, generic set — a runtime whose own
+#: vocabulary is richer maps into these and keeps its native value in
+#: :attr:`TaskView.runtime_status`, so the UI is portable and nothing is lost.
+TASK_STATES = ("pending", "running", "blocked", "review", "done", "archived")
+
+
+@dataclass(frozen=True)
+class TaskView:
+    """One unit of work, as the control plane sees it.
+
+    A read model: it is assembled for display and never written back. ``runtime_status``
+    carries the runtime's own word for the state, because an operator debugging a stuck
+    task needs the runtime's vocabulary, not a translation of it.
+    """
+
+    task_id: str
+    title: str
+    state: str
+    runtime_status: str = ""
+    agent_id: str = ""
+    created_at: Optional[int] = None
+    started_at: Optional[int] = None
+    completed_at: Optional[int] = None
+    priority: int = 0
+    consecutive_failures: int = 0
+    last_error: str = ""
+    tenant_id: str = ""
+    detail: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def needs_attention(self) -> bool:
+        """Blocked, or failing repeatedly. What an operator should look at first."""
+        return self.state == "blocked" or self.consecutive_failures > 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task_id": self.task_id,
+            "title": self.title,
+            "state": self.state,
+            "runtime_status": self.runtime_status,
+            "agent_id": self.agent_id,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "completed_at": self.completed_at,
+            "priority": self.priority,
+            "consecutive_failures": self.consecutive_failures,
+            "last_error": self.last_error,
+            "needs_attention": self.needs_attention,
+        }
+
+
+@dataclass(frozen=True)
+class RuntimeHealth:
+    """Whether the runtime is present and readable.
+
+    ``reachable`` false is a normal state, not an error: a fresh deployment has no work
+    store until the runtime first runs. The control plane reports that plainly rather
+    than failing.
+    """
+
+    reachable: bool
+    detail: str = ""
+    work_store_present: bool = False
+    agent_count: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reachable": self.reachable,
+            "detail": self.detail,
+            "work_store_present": self.work_store_present,
+            "agent_count": self.agent_count,
+        }
+
+
 @dataclass(frozen=True)
 class MaterializedAgent:
     """An agent as it currently exists inside a runtime.
@@ -162,6 +236,23 @@ class AgentRuntime(ABC):
         dry_run: bool = False,
     ) -> MaterializeResult:
         """Project branding into the runtime's display surfaces."""
+
+    @abstractmethod
+    def list_tasks(self, *, agent_id: str = "", limit: int = 200) -> list[TaskView]:
+        """Work the runtime currently holds, newest first.
+
+        A read model over whatever the runtime uses to track work. Implementations must
+        open that store read-only: the control plane observes, it does not write.
+        Returns an empty list when the runtime has no work store yet.
+        """
+
+    @abstractmethod
+    def get_task(self, task_id: str) -> Optional[TaskView]:
+        """One task, or None when it is not present."""
+
+    @abstractmethod
+    def health(self) -> RuntimeHealth:
+        """Whether the runtime is present and readable."""
 
     @property
     @abstractmethod

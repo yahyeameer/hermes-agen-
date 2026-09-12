@@ -26,12 +26,12 @@ Directories appear as their phase lands. Phase 1 built the first five.
 spec/           AgentSpec, IdentitySpec, OrganizationSpec, TenantBundle    [built]
 runtime/        AgentRuntime contract, registry, and the Hermes adapter    [built]
 audit/          Append-only log enforcing "model-visible means logged"     [built]
+control/        Control API (read-only) + the dashboard                    [built]
 apply.py        Bundle -> runtime orchestration                            [built]
-cli.py          `python -m nova validate | plan | apply | status`          [built]
+cli.py          `python -m nova validate | plan | apply | status | serve`  [built]
 examples/       A complete two-agent tenant bundle                         [built]
 
 policy/         (agent, tool, action) -> allow | require-approval | deny   [planned]
-control/        Platform Control API - read models + typed commands        [planned]
 supervisor/     Decompose -> route -> task board -> collect                [planned]
 knowledge/      Ingest -> extract -> chunk -> index -> retrieve            [planned]
 observability/  JSON logs, correlation IDs, CloudWatch                     [planned]
@@ -48,6 +48,7 @@ python -m nova validate nova/examples/acme
 python -m nova plan     nova/examples/acme
 python -m nova apply    nova/examples/acme
 python -m nova status
+python -m nova serve nova/examples/acme   # dashboard on 127.0.0.1:8787
 ```
 
 ## Three rules, in short

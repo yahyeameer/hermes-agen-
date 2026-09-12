@@ -16,8 +16,11 @@ from nova.runtime.base import (
     MaterializedAgent,
     MaterializeResult,
     RuntimeCapabilities,
+    RuntimeHealth,
+    TaskView,
 )
 from nova.runtime.hermes import materialize as _materialize
+from nova.runtime.hermes import work as _work
 from nova.runtime.hermes.paths import HermesPaths
 from nova.spec import AgentSpec, IdentitySpec
 
@@ -186,6 +189,24 @@ class HermesRuntime(AgentRuntime):
         ):
             shutil.rmtree(profile_dir)
         return True
+
+    # -- work read models -----------------------------------------------------
+
+    def list_tasks(self, *, agent_id: str = "", limit: int = 200) -> list[TaskView]:
+        return _work.list_tasks(self.paths.home, agent_id=agent_id, limit=limit)
+
+    def get_task(self, task_id: str) -> Optional[TaskView]:
+        return _work.get_task(self.paths.home, task_id)
+
+    def health(self) -> RuntimeHealth:
+        present, detail = _work.store_status(self.paths.home)
+        home_exists = self.paths.home.is_dir()
+        return RuntimeHealth(
+            reachable=home_exists,
+            detail=detail if home_exists else f"runtime home {self.paths.home} does not exist",
+            work_store_present=present,
+            agent_count=len(self.list_agents()),
+        )
 
     # -- identity -------------------------------------------------------------
 

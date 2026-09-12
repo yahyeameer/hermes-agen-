@@ -24,7 +24,10 @@ touching runtime code, white-label identity, and an audit log that enforces
 | `nova/runtime/hermes/` | The Hermes adapter — paths, materializer, skin projector |
 | `nova/audit/log.py` | Append-only JSONL log with write-ahead model-visible changes |
 | `nova/apply.py` | Bundle → runtime orchestration |
-| `nova/cli.py` | `python -m nova validate \| plan \| apply \| status` |
+| `nova/control/api.py` | Control API route handlers — pure, transport-free |
+| `nova/control/server.py` | Read-only HTTP transport + static serving |
+| `nova/control/static/` | The dashboard — no build step, no external resources |
+| `nova/cli.py` | `python -m nova validate \| plan \| apply \| status \| serve` |
 | `scripts/check_protected_identifiers.py` | CI guardrail for the boundary rules |
 
 Dependencies: **the standard library and PyYAML**. Nothing else. The platform layer
@@ -37,6 +40,7 @@ python -m nova validate nova/examples/acme    # load and fully validate a bundle
 python -m nova plan     nova/examples/acme    # show what applying would change
 python -m nova apply    nova/examples/acme    # make the runtime match the bundle
 python -m nova status                         # what the runtime currently holds
+python -m nova serve    nova/examples/acme    # control API + dashboard on 127.0.0.1:8787
 ```
 
 `nova/examples/acme` is a complete two-agent tenant bundle used by the tests.
@@ -88,7 +92,15 @@ These are recorded rather than hidden. Each is a deliberate Phase 1 boundary.
   working when enforcement arrives underneath them.
 - **`knowledge.sources` is inert.** No runtime can retrieve yet. Declaring sources
   produces a warning, never a silent drop.
-- **No Control API and no dashboard.** Deferred from the original Phase 1 scope.
+- **The Control API is read-only.** Every write method is refused with 405 before a
+  handler runs. The typed command set is a later phase; there is no write path to get
+  wrong on day one.
+- **The dashboard has no auth of its own.** It inherits the server's: loopback by
+  default, and a bearer token is required to bind anything else. Per-user accounts and
+  RBAC are a later phase.
+- **`/identity` serves the declared bundle, not the applied skin.** Where the two differ
+  the `/agents` route reports `in_sync: false` rather than presenting one as the other.
+- **Tasks come from the default board only.** Multi-board deployments are not read yet.
 - **No environment-variable or home-directory aliases in the runtime itself.** NOVA
   resolves `$NOVA_HOME → ~/.nova → $HERMES_HOME → ~/.hermes` for its own purposes; the
   runtime still reads its own variables. Aliasing inside the runtime is a future core patch.
@@ -96,6 +108,52 @@ These are recorded rather than hidden. Each is a deliberate Phase 1 boundary.
   stays an explicit operator action.
 - **Single tenant per deployment.** The tenant id is carried everywhere, but nothing
   enforces isolation between tenants in one home.
+
+## The Control API
+
+Five read-only routes under `/platform/v1`, served by a stdlib transport so the platform
+layer keeps its zero-dependency surface.
+
+| Route | Returns |
+|---|---|
+| `GET /health` | Platform version, runtime capabilities and reachability, bundle digest |
+| `GET /identity` | Resolved branding — what the dashboard themes itself from |
+| `GET /agents` | Declared agents with applied state and an `in_sync` flag, plus undeclared runtime agents |
+| `GET /tasks?agent=&limit=` | Work newest-first with a per-state tally and a needs-attention count |
+| `GET /tasks/{id}` | One task |
+
+Handlers are pure functions of `(path, query) → Response`, so the API is tested directly
+and the transport is replaceable without touching behaviour.
+
+**Safety properties, each tested:** only GET and HEAD are served (everything else is 405
+before any handler runs); binding a non-loopback interface without a token is refused at
+construction; the work store is opened with SQLite's read-only URI mode; static serving is
+confined to its directory; a strict CSP and `nosniff` ship on every response.
+
+**Runtime status is mapped, not replaced.** NOVA's canonical states are
+`pending / running / blocked / review / done / archived`; the runtime's own word is kept in
+`runtime_status`, because an operator debugging a stuck task needs the runtime's
+vocabulary. An unknown status degrades to `pending` and keeps its native value, so a
+runtime that adds a state does not break the control plane.
+
+## The dashboard
+
+One HTML page, one stylesheet, one script. No build step, no framework, no external
+resources — it must work inside an isolated customer network.
+
+- **It talks only to `/platform/v1`.** A test parses `app.js` and fails if any `fetch`
+  bypasses the API prefix. That is the control-plane boundary, enforced in CI.
+- **It themes itself at boot** from `/identity`: the tenant's accent becomes a CSS custom
+  property, and the product name becomes the title. One build, many brands.
+- **Status colours are reserved and never themed.** A customer's brand must not repaint
+  "blocked". They render as tinted pills with ink text and an always-present label, so
+  colour aids recognition and the word carries the meaning.
+- **Only states needing a human get colour** — `done`, `review`, `blocked`. The rest stay
+  neutral, so colour marks attention rather than decorating every row.
+- **API data is inserted with `textContent`, never as markup.** Task titles and agent names
+  are customer-controlled strings; a test enforces this.
+- **Empty states explain themselves.** A fresh deployment has no tasks, and the page says
+  so rather than looking broken.
 
 ## Extension points
 
@@ -116,7 +174,7 @@ adapter package if its output format belongs to a runtime.
 
 ## Tests
 
-`tests/platform/` — 120 tests, runnable with only pytest and PyYAML installed.
+`tests/platform/` — 158 tests, runnable with only pytest and PyYAML installed.
 
 | File | Covers |
 |---|---|
@@ -127,3 +185,5 @@ adapter package if its output format belongs to a runtime.
 | `test_identity.py` | Projection, idempotence, rebranding without code change |
 | `test_apply.py` | End-to-end apply, ordering, orphans, two tenants one build |
 | `test_boundaries.py` | Import direction, dependency surface, vocabulary leakage, stdlib shadowing |
+| `test_control_api.py` | Routes, drift detection, status mapping, read-only store |
+| `test_control_server.py` | Bind safety, read-only methods, auth, path traversal, dashboard boundary |
