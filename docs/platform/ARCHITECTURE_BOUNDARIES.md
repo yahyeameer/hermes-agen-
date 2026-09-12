@@ -1,0 +1,227 @@
+# Architecture Boundaries
+
+**Authoritative. Read this before adding, moving, or renaming anything.**
+
+This repository is a fork of the upstream Hermes Agent runtime, extended with a platform layer
+that turns it into a reusable, white-labelable enterprise agent platform. Those two things are
+kept strictly apart. This document says where the line is, why it is there, and what happens if
+it is crossed.
+
+Working name of the product is **NOVA**. It is a *display name held in configuration*, never an
+identifier in code. See §4.
+
+---
+
+## 1. The two halves
+
+| | Upstream-owned | Platform-owned |
+|---|---|---|
+| **Paths** | everything not listed opposite | `platform/`, `deploy/`, `docs/platform/`, `customer/` |
+| **Origin** | `NousResearch/hermes-agent` | this fork |
+| **Change policy** | **patch budget — near zero** | free |
+| **Merge behaviour** | merges from upstream land here | upstream never touches these paths |
+| **May import** | never imports `platform.*` | may import upstream modules |
+
+The dependency arrow points **one way**: platform code imports Hermes; Hermes code never imports
+platform code and must never learn that the platform exists.
+
+That single rule is what keeps `git merge upstream/main` a routine operation. A conditional in
+core that reads a platform config is not a small compromise — it inverts the arrow and makes
+every future upstream change a potential conflict.
+
+---
+
+## 2. Do not touch
+
+These are load-bearing for mergeability, correctness, or live installations. The audits in
+`HERMES_PLATFORM_AUDIT.md` and `BRAND_SURFACE_AUDIT.md` have the measured detail.
+
+### 2.1 Modules — never rename, never restructure
+
+| Module | Why |
+|---|---|
+| `hermes_cli/` (481 files, imported 10,150×) | Renaming rewrites every import and conflicts with nearly every upstream commit |
+| `hermes_state*.py` (22 modules) | Session, message, FTS and usage storage |
+| `hermes_cli/kanban_db.py`, `kanban_db_dispatch.py` | The task kernel and dispatcher. Production-grade; extend via the `spawn_fn` hook, never by editing |
+| `agent/`, `run_agent.py`, `cli.py` | The agent loop and its surfaces |
+| `gateway/`, `gateway/platforms/` | Gateway and ~20 platform adapters |
+| `tools/`, `tools/approval*.py` | Tool registry and the approval gate. Extend with a policy layer above it |
+| `hermes_constants.py`, `hermes_logging.py` | Home resolution, log redaction |
+| `tests/` (3,991 files) | Not shipped. Editing them is pure merge cost |
+
+### 2.2 Identifiers — never rename; alias instead
+
+| Identifier | Breaks on rename |
+|---|---|
+| `HERMES_*` environment variables (**225 distinct**) | Every existing deployment, container, systemd unit and CI job |
+| `$HERMES_HOME` / `~/.hermes` | All state: `state.db`, `kanban.db`, credentials, profiles, skills |
+| `hermes-*` toolset names | Written into `config.yaml`; a rename silently disables toolsets |
+| `X-Hermes-*` HTTP headers (9) | Gateway / sidecar / relay wire protocol |
+| `hermes://` URL scheme (7 routes) | OS-registered deep links, plugin and blueprint install links |
+| `hermes_agent.plugins` entry-point group | Every pip-installed third-party plugin |
+| `compat_manifest.json` import paths | External plugins using the compatibility shim |
+| Console scripts `hermes`, `hermes-agent`, `hermes-acp` | Scripts, cron entries, runbooks, muscle memory |
+| PyPI distribution `hermes-agent` | How the runtime is installed and updated |
+
+### 2.3 Upstream references — never rewrite
+
+`github.com/NousResearch/*`, `nousresearch.com`, and the upstream remote. Required technically
+(install, update, issue links) and in some cases legally (MIT attribution).
+
+### 2.4 The one that will bite you
+
+> **`Hermes-4-405B`, `NousResearch/Hermes-3-Llama-3.1-70B`, `nousresearch/hermes-4-405b` are
+> large language models — a different product that happens to share a name with the runtime.**
+
+189 occurrences, in provider profiles, the model-routing regexes in `hermes_cli/model_switch.py`,
+and auxiliary-client configuration. A rename here silently breaks model resolution, and it
+surfaces as a 404 from an inference provider rather than as a failing test.
+
+`scripts/check_protected_identifiers.py` enforces `[Hh]ermes-[0-9]` as an absolute exclusion.
+Never add an exception to it.
+
+---
+
+## 3. Extension points — use these instead of editing core
+
+Every one of these is an upstream-supported seam. Reaching for one of these instead of a core
+edit is the single most useful habit in this repository.
+
+| Need | Seam | Core edit? |
+|---|---|---|
+| New model backend | `plugins/model-providers/`, `hermes_agent.plugins` entry point | none |
+| New agent | A **profile** — `$HERMES_HOME/profiles/<name>/` with its own config, persona, MCP, skills | none |
+| Packaged, versioned agent bundle | A **distribution** — `distribution.yaml` with install/update and an owned vs. user-owned split | none |
+| Branding: CLI/TUI name, welcome, prompt, banner, colors | A **skin** — `$HERMES_HOME/skins/<name>.yaml`; `load_skin()` prefers user skins over built-ins | none |
+| Branding: gateway and slash-command strings | A **locale overlay** — `locales/*.yaml` behind `agent/i18n.py` | none |
+| Agent persona and voice | `SOUL.md` — distribution-owned, per profile | none |
+| Tool scoping per agent | `enabled_toolsets` + registry availability checks | none |
+| Integrations | Per-profile `mcp.json` | none |
+| Scheduled work | `cron/`, blueprints in skill frontmatter | none |
+| Worker spawn behaviour | The dispatcher's `spawn_fn` hook | none |
+| Dashboard authentication | `plugins/dashboard_auth/` | none |
+| Tracing | `plugins/observability/` | none |
+
+**If you are about to edit core, you have probably missed a seam above. Check first.**
+
+---
+
+## 4. Identity and branding
+
+Branding is **tenant configuration compiled into existing surfaces** — never a string in code,
+and never a runtime lookup from core.
+
+- One source: the tenant's `identity.yaml`.
+- Projected by `platform/identity/` into a skin, a locale overlay, a `SOUL.md`, and theme tokens
+  served to the platform dashboard.
+- **Core never imports the identity layer.** It reads a skin file and a locale file, which it
+  already does for its own reasons.
+
+`NOVA` is a default display value in configuration. It must never appear as a module name, an
+environment-variable prefix, a database column, a class name, or a wire identifier. The same
+build serves `NOVA AI Workforce`, `Acme Intelligence` and `Bristol Foods AI Workforce` with no
+source change.
+
+---
+
+## 5. The control-plane boundary
+
+**The Hermes dashboard is not, and will not become, the customer dashboard.**
+
+This is a factual constraint, not a preference. `hermes_cli/web_server.py` mounts its FastAPI app
+**inside the gateway process**, and `_spawn_hermes_action()` acts on the runtime by launching
+`hermes <subcommand>` subprocesses that inherit `os.environ`. It is a same-host, fully-privileged
+engineering tool, correct for its purpose and unsuitable for customer operators.
+
+The customer path is:
+
+```
+Customer operator
+   -> Platform Dashboard        (platform-owned React app)
+   -> Platform Control API      (platform-owned, separate process, typed commands)
+   -> Agent Platform            (platform/agents, platform/policy)
+   -> Hermes Runtime            (upstream — never reached directly from the UI)
+```
+
+Rules:
+
+1. The platform dashboard talks **only** to the Platform Control API. It never calls a Hermes
+   endpoint and never learns a Hermes path, profile directory or table name.
+2. The Control API reads runtime state through **read models** — a read-only connection to
+   `kanban.db`, `task_events`, `task_runs`, and the usage tables — never by scraping logs.
+3. The Control API writes through **narrow typed commands** that map onto existing kernel
+   functions. Arbitrary subprocess spawn from a web handler is forbidden.
+4. The Hermes dashboard and CLI stay, bound to localhost, for engineering and debugging.
+5. A future `nova` CLI covers platform and deployment operations only. **Do not re-implement the
+   Hermes CLI.**
+
+---
+
+## 6. The deployment boundary
+
+One customer, one deployment, inside **the customer's own AWS account**. The deployment provisions
+the platform *and* the agent runtime together — never the platform alone with the runtime
+elsewhere. Amazon Bedrock is the inference layer, not the hosting target.
+
+Agent access to customer systems is explicit and least-privilege:
+
+- The runtime's task role carries **no customer-data permissions by default**.
+- Each integration is a separately-scoped IAM role, assumed per integration, whose trust policy
+  names the runtime role. Adding an integration is an auditable IAM change the customer's own
+  security team can review.
+- **Agents never receive broad access to the customer's AWS account.**
+- Deployment is Terraform the customer's DevOps team runs with their own credentials. **We never
+  require or hold root or admin credentials.**
+
+Storage is SQLite on an attached volume, so v1 is deliberately **single-node**. This is a
+documented constraint, not an oversight: SQLite's guarantees hold across processes on one host
+and not across hosts, and SQLite on EFS/NFS risks corruption.
+
+---
+
+## 7. The patch budget
+
+Every edit to an upstream-owned file is recorded in `docs/platform/CORE_PATCHES.md` with one line
+saying why. The target is a handful of small, additive hook points.
+
+**The list is reviewed at every upstream merge. If it is growing, something has gone wrong.**
+
+Before adding an entry, answer: *which extension point in §3 did I fail to find?*
+
+---
+
+## 8. Upstream update procedure
+
+1. Fetch upstream.
+2. Merge or rebase.
+3. Run the **upstream** test suite.
+4. Run the **platform** test suite.
+5. Run integration and security tests.
+6. Release a new platform version.
+
+Platform paths do not participate in step 2 — upstream has never heard of them. Brand-owned files
+resolve automatically via the `merge=brandours` driver in `.gitattributes`. Only the hook points
+in the patch budget can genuinely conflict.
+
+---
+
+## 9. Guardrails
+
+| Guardrail | Enforces |
+|---|---|
+| `scripts/check_protected_identifiers.py` | §2.2 and §2.4 — no rename of protected identifiers, absolute `[Hh]ermes-[0-9]` exclusion |
+| Import-direction check | §1 — no upstream module imports `platform.*` |
+| Patch-budget check | §7 — an upstream-owned file changed without a ledger entry fails CI |
+| `merge=brandours` in `.gitattributes` | §8 — brand-owned files resolve without manual attention |
+
+---
+
+## 10. Five things that would break this architecture
+
+1. Renaming `hermes_cli` or any module in §2.1 to make the repository look branded.
+2. Adding a platform import, or a platform-aware conditional, to an upstream-owned file.
+3. Pointing the customer dashboard at a Hermes endpoint because it was quicker.
+4. Replacing a `HERMES_*` variable or `~/.hermes` instead of aliasing it.
+5. A find-and-replace that catches `Hermes-4-405B`.
+
+If a change you are about to make matches one of these, stop and re-read §3.

@@ -1,0 +1,85 @@
+# platform/ — Development Guide
+
+Read this before editing anything under `platform/`, `deploy/`, or `docs/platform/`.
+The authoritative rules are `docs/platform/ARCHITECTURE_BOUNDARIES.md`; this is the working
+summary for people and AI assistants making changes here.
+
+## What this area is
+
+`platform/` is the **platform-owned** half of this repository: the business, tenant and control
+layer that turns the upstream Hermes Agent runtime into a reusable, white-labelable enterprise
+agent platform. Everything outside the paths above is **upstream-owned** and comes from
+`NousResearch/hermes-agent`.
+
+Product working name is **NOVA**. It is a display value in tenant configuration. It must never
+appear as a module name, environment-variable prefix, class name, database column, or wire
+identifier.
+
+## The one rule that matters most
+
+> **The dependency arrow points one way. `platform/` imports Hermes. Hermes never imports
+> `platform`, and must never learn that the platform exists.**
+
+An `if platform_config_enabled:` in an upstream file is not a small compromise — it inverts the
+arrow and turns every future upstream change into a potential conflict. CI enforces this.
+
+## Before you edit a file outside platform/
+
+Ask, in this order:
+
+1. **Is there an extension point?** Profiles, distributions, skins, locale overlays, `SOUL.md`,
+   toolsets, `mcp.json`, plugins, the dispatcher's `spawn_fn` hook, `plugins/dashboard_auth/`,
+   `plugins/observability/`. `ARCHITECTURE_BOUNDARIES.md` §3 is the full table.
+   **Almost always the answer is yes and you should stop here.**
+2. **If genuinely not:** make the smallest additive hook, and add a line to
+   `docs/platform/CORE_PATCHES.md` saying which file, why, and which seam was missing.
+3. **Never:** rename an upstream module, replace a `HERMES_*` variable, or edit
+   `hermes_cli/kanban_db.py` or `kanban_db_dispatch.py`.
+
+## Never rename these
+
+`hermes_cli`, `hermes_state*`, `agent/`, `cli.py`, `gateway/`, `tools/`, `tests/`; the 225
+`HERMES_*` environment variables; `~/.hermes`; `hermes-*` toolset names; `X-Hermes-*` headers;
+`hermes://`; the `hermes_agent.plugins` entry-point group; the `hermes` console script; the PyPI
+name `hermes-agent`; upstream URLs.
+
+**And above all:** `Hermes-4-405B`, `NousResearch/Hermes-3-Llama-3.1-70B` and friends are *large
+language models*, not this runtime. Renaming them breaks model resolution and fails as a provider
+404, not a test. `scripts/check_protected_identifiers.py` excludes `[Hh]ermes-[0-9]` absolutely.
+Never add an exception.
+
+When a new name is needed, **alias**: `NOVA_FOO` resolving first and falling back to `HERMES_FOO`;
+`$NOVA_HOME` → `~/.nova` → `$HERMES_HOME` → `~/.hermes`. Both always work.
+
+## Branding is compiled, never looked up
+
+One source — the tenant's `identity.yaml` — projected by `platform/identity/` into a skin file, a
+locale overlay, a `SOUL.md`, and theme tokens served over the Control API. Core reads a skin and a
+locale file, which it already does for its own reasons, and never imports `platform.identity`.
+
+If you find yourself adding a product-name string to a `.py` file, you are in the wrong layer.
+
+## The control-plane boundary
+
+The Hermes dashboard mounts inside the gateway process and acts by spawning `hermes` subprocesses
+with inherited `os.environ` (`hermes_cli/web_server_gateway.py`). It is a privileged same-host
+engineering tool and is **not** the customer surface.
+
+- The platform dashboard talks **only** to the Platform Control API.
+- The Control API reads through read-only models and writes through a fixed set of typed commands.
+- **No arbitrary subprocess spawn from a web handler.**
+- The Hermes dashboard and CLI stay on localhost for engineering. Do not rebuild the Hermes CLI.
+
+## Tests
+
+Platform tests live under `tests/platform/`. Do not modify existing upstream tests — 3,991 files
+that are not shipped and are pure merge cost. If an upstream test blocks you, that is usually a
+sign the change belongs in `platform/`.
+
+## Definition of done for a platform change
+
+- [ ] No upstream-owned file changed, or a `CORE_PATCHES.md` entry explains why.
+- [ ] No upstream module imports `platform.*`.
+- [ ] No product name hard-coded in a `.py`, `.ts`, or `.tsx` file.
+- [ ] No protected identifier renamed; `scripts/check_protected_identifiers.py` passes.
+- [ ] Platform tests pass, and so does the upstream suite.
