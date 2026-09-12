@@ -1,12 +1,12 @@
 # platform/ — Development Guide
 
-Read this before editing anything under `platform/`, `deploy/`, or `docs/platform/`.
+Read this before editing anything under `nova/`, `deploy/`, or `docs/platform/`.
 The authoritative rules are `docs/platform/ARCHITECTURE_BOUNDARIES.md`; this is the working
 summary for people and AI assistants making changes here.
 
 ## What this area is
 
-`platform/` is the **platform-owned** half of this repository: the business, tenant and control
+`nova/` is the **platform-owned** half of this repository: the business, tenant and control
 layer that turns the upstream Hermes Agent runtime into a reusable, white-labelable enterprise
 agent platform. Everything outside the paths above is **upstream-owned** and comes from
 `NousResearch/hermes-agent`.
@@ -17,7 +17,7 @@ identifier.
 
 ## The one rule that matters most
 
-> **The dependency arrow points one way. `platform/` imports Hermes. Hermes never imports
+> **The dependency arrow points one way. `nova/` imports Hermes. Hermes never imports
 > `platform`, and must never learn that the platform exists.**
 
 An `if platform_config_enabled:` in an upstream file is not a small compromise — it inverts the
@@ -53,7 +53,7 @@ When a new name is needed, **alias**: `NOVA_FOO` resolving first and falling bac
 
 ## Branding is compiled, never looked up
 
-One source — the tenant's `identity.yaml` — projected by `platform/identity/` into a skin file, a
+One source — the tenant's `identity.yaml` — projected by `nova/identity/` into a skin file, a
 locale overlay, a `SOUL.md`, and theme tokens served over the Control API. Core reads a skin and a
 locale file, which it already does for its own reasons, and never imports `platform.identity`.
 
@@ -70,11 +70,29 @@ engineering tool and is **not** the customer surface.
 - **No arbitrary subprocess spawn from a web handler.**
 - The Hermes dashboard and CLI stay on localhost for engineering. Do not rebuild the Hermes CLI.
 
+## What exists today
+
+`spec/` (AgentSpec, IdentitySpec, TenantBundle), `runtime/` (the `AgentRuntime` contract,
+the registry, and the Hermes adapter), `audit/`, `apply.py`, `cli.py`. See
+`docs/platform/PHASE_1.md` for what each does, what it deliberately does not do, and how
+to extend it.
+
+Dependencies are the standard library and PyYAML. **Do not add a third.** The layer must
+import and test without the runtime installed; `tests/platform/test_boundaries.py`
+enforces it.
+
+## Never name the package `platform/`
+
+A root `platform/` package shadows the stdlib `platform` module that 40 upstream files
+import for OS detection, breaking `platform.system()` everywhere. That is why this
+package is `nova/`. `scripts/check_protected_identifiers.py` fails if `platform/__init__.py`
+reappears.
+
 ## Tests
 
 Platform tests live under `tests/platform/`. Do not modify existing upstream tests — 3,991 files
 that are not shipped and are pure merge cost. If an upstream test blocks you, that is usually a
-sign the change belongs in `platform/`.
+sign the change belongs in `nova/`.
 
 ## Definition of done for a platform change
 
@@ -82,4 +100,6 @@ sign the change belongs in `platform/`.
 - [ ] No upstream module imports `platform.*`.
 - [ ] No product name hard-coded in a `.py`, `.ts`, or `.tsx` file.
 - [ ] No protected identifier renamed; `scripts/check_protected_identifiers.py` passes.
-- [ ] Platform tests pass, and so does the upstream suite.
+- [ ] Platform tests pass (`python -m pytest tests/platform/`), and so does the upstream suite.
+- [ ] Any change to model-visible state goes through `AuditLog.model_visible_change()`.
+- [ ] No new dependency beyond the standard library and PyYAML.

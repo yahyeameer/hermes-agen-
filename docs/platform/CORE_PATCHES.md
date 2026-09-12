@@ -7,18 +7,18 @@ that a contributor reached for a core edit where an extension point existed
 (`ARCHITECTURE_BOUNDARIES.md` §3).
 
 Before adding a row, answer: *which extension point did I fail to find?* If you cannot name one,
-the change probably belongs in `platform/`.
+the change probably belongs in `nova/`.
 
 | # | File | Change | Why | Seam that was missing | Merge risk |
 |---|---|---|---|---|---|
-| 1 | `AGENTS.md` | One row added to the routing table, pointing `platform/`, `deploy/` and `docs/platform/` at `platform/AGENTS.md` | Without it the boundary rules are invisible to future contributors and AI assistants, who are instructed to read the routing table before editing an area | None — this *is* the repo's mechanism for area guidance; it simply has to be registered | **Low.** A single row appended to a stable table |
+| 1 | `AGENTS.md` | One row added to the routing table, pointing `nova/`, `deploy/` and `docs/platform/` at `nova/AGENTS.md` | Without it the boundary rules are invisible to future contributors and AI assistants, who are instructed to read the routing table before editing an area | None — this *is* the repo's mechanism for area guidance; it simply has to be registered | **Low.** A single row appended to a stable table |
 
 ## Not counted here
 
 Paths that do not exist upstream and therefore cannot conflict:
 
-- `platform/**`, `deploy/**`, `docs/platform/**`, `customer/**`
-- `tests/platform/**`
+- `nova/**`, `deploy/**`, `docs/nova/**`, `customer/**`
+- `tests/nova/**`
 - `scripts/check_protected_identifiers.py`
 
 Brand-owned files replaced wholesale and resolved by the `merge=brandours` driver

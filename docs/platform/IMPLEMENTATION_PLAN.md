@@ -67,11 +67,11 @@ deploy/
 customer/          A tenant bundle (git or S3), not committed here
 ```
 
-Nothing in `platform/` is imported by anything upstream. The dependency arrow points one way.
+Nothing in `nova/` is imported by anything upstream. The dependency arrow points one way.
 
 ## 4. Where the identity/branding layer lives
 
-`platform/identity/`, and the architecture is **compile, don't look up**.
+`nova/identity/`, and the architecture is **compile, don't look up**.
 
 One source of truth per tenant:
 
@@ -201,7 +201,7 @@ customer/<tenant>/
 └── manifest.yaml         bundle version + minimum platform version
 ```
 
-Validated by the typed schema in `platform/config/`, then **compiled** into profiles, skins,
+Validated by the typed schema in `nova/config/`, then **compiled** into profiles, skins,
 locale overlays, `mcp.json`, toolset scoping and board configuration. A bad bundle fails
 validation before anything is written — not halfway through materialisation.
 
@@ -248,7 +248,7 @@ exclusion so no sweep can ever reach the model identifiers.
 
 Three mechanics, in order of leverage:
 
-1. **New paths conflict with nothing.** `platform/`, `deploy/`, `docs/platform/` and `customer/`
+1. **New paths conflict with nothing.** `nova/`, `deploy/`, `docs/platform/` and `customer/`
    do not exist upstream. The overwhelming majority of platform code has a zero conflict surface
    by construction.
 2. **Replace brand-owned files wholesale; never line-edit upstream prose.** A rewritten `README.md`
@@ -277,13 +277,13 @@ Zero core patches is the point. If Phase 1 needs a core edit, a seam was missed.
 
 | # | Deliverable | Rides |
 |---|---|---|
-| 1 | `platform/config/` — typed tenant schema, loader, validation | new code |
-| 2 | `platform/identity/` — branding config + **the skin projector only** | existing skins dir |
-| 3 | `platform/agents/` — AgentSpec schema + profile materialiser | existing profiles dir |
+| 1 | `nova/config/` — typed tenant schema, loader, validation | new code |
+| 2 | `nova/identity/` — branding config + **the skin projector only** | existing skins dir |
+| 3 | `nova/agents/` — AgentSpec schema + profile materialiser | existing profiles dir |
 | 4 | `platform/control/` — **read-only** Control API: `/identity`, `/agents`, `/tasks`, `/tasks/{id}`, `/health` | read-only SQLite |
 | 5 | Minimal read-only dashboard consuming those five endpoints, themed from `/identity` | new code |
 | 6 | `scripts/check_protected_identifiers.py` + CI wiring | existing guardrail pattern |
-| 7 | Boundary docs, `platform/AGENTS.md`, patch-budget ledger | **delivered with this plan** |
+| 7 | Boundary docs, `nova/AGENTS.md`, patch-budget ledger | **delivered with this plan** |
 
 Read-only is deliberate: there is no privileged write path to get wrong on day one, and the read
 models are the part every later feature depends on.

@@ -16,7 +16,7 @@ identifier in code. See §4.
 
 | | Upstream-owned | Platform-owned |
 |---|---|---|
-| **Paths** | everything not listed opposite | `platform/`, `deploy/`, `docs/platform/`, `customer/` |
+| **Paths** | everything not listed opposite | `nova/`, `deploy/`, `docs/platform/`, `customer/` |
 | **Origin** | `NousResearch/hermes-agent` | this fork |
 | **Change policy** | **patch budget — near zero** | free |
 | **Merge behaviour** | merges from upstream land here | upstream never touches these paths |
@@ -68,7 +68,17 @@ These are load-bearing for mergeability, correctness, or live installations. The
 `github.com/NousResearch/*`, `nousresearch.com`, and the upstream remote. Required technically
 (install, update, issue links) and in some cases legally (MIT attribution).
 
-### 2.4 The one that will bite you
+### 2.4 The package is named `nova/`, never `platform/`
+
+A top-level `platform/` package **shadows the Python standard library's `platform`
+module**, which 40 upstream modules import for OS detection. The failure is
+`AttributeError: module 'platform' has no attribute 'system'` in every process started
+from the repository root — confusing, wide, and nowhere near the change that caused it.
+
+`scripts/check_protected_identifiers.py` fails if `platform/__init__.py` ever appears.
+Do not "tidy" the package name back.
+
+### 2.5 The one that will bite you
 
 > **`Hermes-4-405B`, `NousResearch/Hermes-3-Llama-3.1-70B`, `nousresearch/hermes-4-405b` are
 > large language models — a different product that happens to share a name with the runtime.**
@@ -112,7 +122,7 @@ Branding is **tenant configuration compiled into existing surfaces** — never a
 and never a runtime lookup from core.
 
 - One source: the tenant's `identity.yaml`.
-- Projected by `platform/identity/` into a skin, a locale overlay, a `SOUL.md`, and theme tokens
+- Projected by `nova/identity/` into a skin, a locale overlay, a `SOUL.md`, and theme tokens
   served to the platform dashboard.
 - **Core never imports the identity layer.** It reads a skin file and a locale file, which it
   already does for its own reasons.
@@ -139,7 +149,7 @@ The customer path is:
 Customer operator
    -> Platform Dashboard        (platform-owned React app)
    -> Platform Control API      (platform-owned, separate process, typed commands)
-   -> Agent Platform            (platform/agents, platform/policy)
+   -> Agent Platform            (nova/agents, nova/policy)
    -> Hermes Runtime            (upstream — never reached directly from the UI)
 ```
 
