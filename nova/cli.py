@@ -20,6 +20,7 @@ from nova.audit import AuditLog, NullAuditLog
 from nova.errors import NovaError
 from nova.observability import configure
 from nova.control.auth import PRINCIPALS_FILENAME, ROLES as AUTH_ROLES
+from nova.deploy.aws import MODULE_PATH, TFVARS_FILENAME
 from nova.runtime import available_runtimes, get_runtime
 from nova.spec import load_bundle
 
@@ -198,6 +199,32 @@ def _build_parser() -> argparse.ArgumentParser:
     audit_verify.add_argument("--json", action="store_true")
 
     audit_status = audit_sub.add_parser("status", help="size, segments and retention")
+
+    deploy_cmd = sub.add_parser(
+        "deploy", help="render infrastructure input from a bundle (never applies it)"
+    )
+    deploy_sub = deploy_cmd.add_subparsers(dest="deploy_command", required=True)
+
+    deploy_render = deploy_sub.add_parser(
+        "render",
+        help="write Terraform variables for the tenant's declared infrastructure",
+    )
+    deploy_render.add_argument("bundle", type=Path)
+    deploy_render.add_argument(
+        "--out", type=Path, default=None, metavar="FILE",
+        help=f"where to write (default: {MODULE_PATH}/{TFVARS_FILENAME} beside the module)",
+    )
+    deploy_render.add_argument(
+        "--module", type=Path, default=None, metavar="DIR",
+        help=f"the Terraform root module (default: ./{MODULE_PATH})",
+    )
+    deploy_render.add_argument("--json", action="store_true", help="print instead of writing")
+
+    deploy_show = deploy_sub.add_parser(
+        "show", help="what the agents would be able to reach, read from the bundle"
+    )
+    deploy_show.add_argument("bundle", type=Path)
+    deploy_show.add_argument("--json", action="store_true")
 
     token = sub.add_parser("token", help="manage control-plane access")
     token_sub = token.add_subparsers(dest="token_command", required=True)
@@ -660,6 +687,90 @@ def _knowledge(args) -> int:
     return 0
 
 
+def _deploy(args) -> int:
+    """``nova deploy`` — render, and refuse to apply.
+
+    NOVA writes a file and stops. Running Terraform is the customer's DevOps team using
+    their own credentials, which is not a limitation to work around: an installer that
+    holds credentials able to create IAM roles in a customer account is the thing their
+    security review exists to prevent, and we would rather not be able to.
+    """
+    from nova.deploy.aws import render_tfvars, write_tfvars
+
+    bundle = load_bundle(args.bundle)
+    deployment = bundle.deployment
+
+    if args.deploy_command == "show":
+        rows = [
+            {
+                "id": i.id,
+                "description": i.description,
+                "agents": list(i.agents),
+                "grants": [
+                    {"actions": list(s.actions), "resources": list(s.resources)}
+                    for s in i.statements
+                ],
+            }
+            for i in deployment.integrations
+        ]
+        if args.json:
+            print(json.dumps({"tenant": bundle.tenant_id, "integrations": rows}, indent=2))
+            return 0
+        print(f"{bundle.tenant_id}: what the agents can reach outside the runtime")
+        if not rows:
+            print("  nothing. No integrations are declared, so no customer system is "
+                  "reachable from an agent.")
+            return 0
+        for row in rows:
+            who = ", ".join(row["agents"]) or "(not attributed to an agent)"
+            print(f"\n  {row['id']}  —  {row['description'] or 'no description'}")
+            print(f"    for: {who}")
+            for grant in row["grants"]:
+                for action in grant["actions"]:
+                    print(f"    {action}")
+                for resource in grant["resources"]:
+                    print(f"      on {resource}")
+        return 0
+
+    payload = render_tfvars(
+        tenant_id=bundle.tenant_id,
+        infrastructure=deployment.infrastructure,
+        integrations=deployment.integrations,
+        known_agents=[spec.id for spec in bundle.agents],
+    )
+
+    if args.json:
+        print(json.dumps(payload, indent=2, sort_keys=True))
+        return 0
+
+    module = args.module or Path(MODULE_PATH)
+    destination = args.out or module / TFVARS_FILENAME
+    write_tfvars(destination, payload)
+
+    print(f"wrote {destination}")
+    print(f"  tenant       {bundle.tenant_id}")
+    print(f"  integrations {len(deployment.integrations)}")
+    missing = [
+        name for name, value in (
+            ("region", deployment.infrastructure.region),
+            ("vpc_id", deployment.infrastructure.vpc_id),
+            ("subnet_id", deployment.infrastructure.subnet_id),
+            ("image_uri", deployment.infrastructure.image_uri),
+        ) if not value
+    ]
+    if missing:
+        print(
+            f"  still needed: {', '.join(missing)} — supply on the Terraform command line, "
+            f"or add an infrastructure block to deployment.yaml"
+        )
+    print(
+        f"\nNOVA does not apply this. Your DevOps team runs, with their own credentials:\n"
+        f"  terraform -chdir={module} init\n"
+        f"  terraform -chdir={module} plan"
+    )
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -716,6 +827,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "doctor":
             return _doctor(args)
+
+        if args.command == "deploy":
+            return _deploy(args)
 
         if args.command == "token":
             return _token(args)

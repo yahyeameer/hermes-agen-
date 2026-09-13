@@ -27,11 +27,17 @@ choice is often per-agent, so both are expressible and the narrower one wins.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
 from nova._fields import Doc
+from nova.deploy.aws import (
+    InfrastructureSpec,
+    IntegrationSpec,
+    parse_infrastructure,
+    parse_integrations,
+)
 from nova.errors import SpecError
 
 #: The file a tenant bundle declares its deployment settings in.
@@ -223,6 +229,13 @@ class DeploymentSpec:
     #: Runtime-specific settings NOVA does not model, written verbatim into the agent's
     #: runtime configuration. Guarded: see :data:`RESERVED_CONFIG_KEYS`.
     runtime_config: Mapping[str, Any] = None  # type: ignore[assignment]
+    #: Where this tenant runs, when NOVA renders the infrastructure. Absent is valid and
+    #: common: a runtime already installed somewhere needs none of this.
+    infrastructure: InfrastructureSpec = field(default_factory=InfrastructureSpec)
+    #: Customer systems the agents may reach, each rendered as a separately-scoped IAM role.
+    #: Empty means the agents reach nothing outside the runtime, which is the default and
+    #: the safe one.
+    integrations: tuple[IntegrationSpec, ...] = ()
     source: Optional[Path] = None
 
     def __post_init__(self) -> None:
@@ -246,8 +259,16 @@ class DeploymentSpec:
         doc = Doc(data or {}, source=source, env=env)
         provider = ProviderSpec.parse(doc.child("provider"), prefix="provider.")
         runtime_config = _parse_runtime_config(doc, source=source)
+        infrastructure = parse_infrastructure(doc.child("infrastructure"))
+        integrations = parse_integrations(doc._raw("integrations"), source=source, env=env)
         doc.reject_unknown()
-        return cls(provider=provider, runtime_config=runtime_config, source=source)
+        return cls(
+            provider=provider,
+            runtime_config=runtime_config,
+            infrastructure=infrastructure,
+            integrations=integrations,
+            source=source,
+        )
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {}
@@ -255,6 +276,14 @@ class DeploymentSpec:
             out["provider"] = self.provider.to_dict()
         if self.runtime_config:
             out["runtime_config"] = dict(self.runtime_config)
+        infrastructure = self.infrastructure.to_tfvars()
+        if infrastructure:
+            out["infrastructure"] = infrastructure
+        if self.integrations:
+            # In the digest, so that changing what an agent may reach changes the bundle
+            # identity — a grant that could be widened without the provenance moving would
+            # be a grant nobody could prove the age of.
+            out["integrations"] = [i.to_tfvars() for i in self.integrations]
         return out
 
 

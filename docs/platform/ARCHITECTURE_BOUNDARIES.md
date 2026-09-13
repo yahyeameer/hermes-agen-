@@ -187,6 +187,14 @@ Agent access to customer systems is explicit and least-privilege:
 - Deployment is Terraform the customer's DevOps team runs with their own credentials. **We never
   require or hold root or admin credentials.**
 
+This is implemented, not aspirational: the root module is `deploy/aws`, and `nova deploy render`
+derives the per-integration roles from the tenant bundle so that what an agent may reach cannot
+drift from what was declared. The three refusals that keep the last bullet true — no wildcard
+action, no `"*"` resource, no `iam`/`sts`/`organizations`/`account`/`kms` action on an
+integration — are enforced twice, in the generator and again in the module's own variable
+validation, because the tfvars file can be hand-edited. `deploy/aws/README.md` records what has
+been verified and what has not.
+
 Storage is SQLite on an attached volume, so v1 is deliberately **single-node**. This is a
 documented constraint, not an oversight: SQLite's guarantees hold across processes on one host
 and not across hosts, and SQLite on EFS/NFS risks corruption.

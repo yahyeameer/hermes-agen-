@@ -2,7 +2,7 @@
 
 Every Phase 1–5 capability re-verified against its actual runtime call site, plus the gaps
 that stand between NOVA and a real customer AWS account. **Nothing was implemented during
-this audit.** 440 platform tests pass; the findings below are things tests do not cover
+this audit.** 440 platform tests pass (577 after the work the findings prompted); the findings below are things tests do not cover
 because they are about seams, deployment and claims rather than logic.
 
 Severity is about *deploying to a paying customer*, not about code quality:
@@ -21,7 +21,7 @@ Severity is about *deploying to a paying customer*, not about code quality:
 | 2 | ~~Bearer token passed as a CLI argument~~ | Secrets | **FIXED** |
 | 3 | ~~No identity, users or RBAC~~ (OIDC still future) | Auth | **FIXED** |
 | 4 | ~~Tenant collision is silent~~ | Isolation | **FIXED** |
-| 5 | No AWS deployment artifacts of any kind | AWS | **Blocking** |
+| 5 | ~~No AWS deployment artifacts of any kind~~ (never applied for real) | AWS | **FIXED** |
 | 6 | ~~`credential_isolation=True` overclaims~~ | Enforcement | **FIXED** |
 | 7 | ~~Control plane returns every task regardless of tenant~~ | Isolation | **FIXED** |
 | 8 | ~~Audit log: no rotation or retention~~ | Observability | **FIXED** |
@@ -139,15 +139,41 @@ it is a trap, and an operator will fall into it by putting two bundles on one bo
 profile belonging to a different tenant, in the same way materialization already refuses a
 profile with no provenance at all.
 
-### 5. No AWS deployment artifacts
+### 5. No AWS deployment artifacts — **FIXED**
 
-There is no Terraform, no CDK, no CloudFormation, no container image, no systemd unit, no
-AMI recipe. `ARCHITECTURE_BOUNDARIES.md` §6 describes the IAM model in prose — per-integration
+> A Terraform root module in `deploy/aws`, and `nova deploy render`, which derives the
+> per-integration IAM from the tenant bundle rather than leaving it to be maintained
+> alongside. The derivation is the point: a grant that lives beside the declaration drifts
+> from it, and the drift is only ever in one direction.
+>
+> The refusals are what makes §6 a control instead of a sentence. A wildcard action, a `"*"`
+> resource, and any `iam`/`sts`/`organizations`/`account`/`kms` action are refused — in the
+> generator, *and again* in the module's own `variable "integrations"` validation, because a
+> check that lives only in the generator is one an operator skips by hand-editing the tfvars,
+> and the operator who does that is the one under time pressure.
+>
+> **What is verified, and what is not.** Verified offline against the real AWS provider:
+> `terraform validate` passes, `fmt -check` is clean, every refusal fires at plan time
+> against deliberately over-broad input, and — applied against a mock AWS API — the rendered
+> IAM is what is claimed. The runtime role's policy contains no customer-data permission of
+> any kind; its only `sts:AssumeRole` names the declared integration roles one by one; the
+> integration trust policy names the runtime role plus an external id; the permissions
+> boundary denies `iam:*`.
+>
+> **Not verified: this has never been applied to a real AWS account.** `aws_instance` and the
+> Session Manager policy attachment went unexercised (the mock has neither a real AMI nor the
+> AWS-managed policy catalogue), and `user_data.sh.tftpl` has never run on a booting host.
+> The finding moves to FIXED because the artifacts exist and their security properties are
+> demonstrated; the first real deployment is still a first real deployment, and
+> `deploy/aws/README.md` says so where somebody will read it.
+
+There was no Terraform, no CDK, no CloudFormation, no container image, no systemd unit, no
+AMI recipe. `ARCHITECTURE_BOUNDARIES.md` §6 described the IAM model in prose — per-integration
 roles assumed by a named runtime role, least privilege, no permanent admin — and **none of it
-exists as code**.
+existed as code**.
 
-"Deploy NOVA to a customer AWS account" currently means a human following prose. The IAM
-design is sound and unimplemented; that gap is the single largest piece of work remaining.
+"Deploy NOVA to a customer AWS account" meant a human following prose. The IAM design was
+sound and unimplemented; that gap was the single largest piece of work remaining.
 
 ### 6. `credential_isolation=True` overclaims — **FIXED**
 
@@ -345,3 +371,8 @@ The six blocking findings are not equal work. Grouped by what they share:
    settled first, since the IaC has to encode the trust boundaries they define.
 
 Findings 8–16 are real but none of them should reorder the four above.
+
+**All four are now done**, in that order — the last of them, AWS deployment, in `deploy/aws`
+and `nova/deploy/`. What remains on this list is the four entries under *Future capability*,
+which are absent by decision rather than by omission, and the one honest caveat on finding 5:
+the module has never met a real AWS account.
