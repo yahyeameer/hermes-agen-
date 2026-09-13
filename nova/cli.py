@@ -18,6 +18,7 @@ from nova import __version__
 from nova.apply import apply_bundle
 from nova.audit import AuditLog, NullAuditLog
 from nova.errors import NovaError
+from nova.observability import configure
 from nova.control.auth import PRINCIPALS_FILENAME, ROLES as AUTH_ROLES
 from nova.runtime import available_runtimes, get_runtime
 from nova.spec import load_bundle
@@ -37,6 +38,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--home", type=Path, default=None, help="runtime home directory (default: auto-detected)"
+    )
+    parser.add_argument(
+        "--log-level",
+        default="",
+        metavar="LEVEL",
+        help="operational logging to stderr: debug, info, warning, error. Off unless set "
+             "here or in NOVA_LOG_LEVEL — a CLI printing structured logs over its own "
+             "output is hostile to whoever is running it",
+    )
+    parser.add_argument(
+        "--log-format", choices=["json", "text"], default="",
+        help="json for a log shipper (default), text for a human watching a terminal",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -150,6 +163,42 @@ def _build_parser() -> argparse.ArgumentParser:
              "non-loopback interface without --tls-cert",
     )
 
+    backup_cmd = sub.add_parser("backup", help="archive the state NOVA owns")
+    backup_cmd.add_argument("bundle", type=Path)
+    backup_cmd.add_argument("destination", type=Path, help="path for the .tar.gz")
+    backup_cmd.add_argument(
+        "--include-secrets", action="store_true",
+        help="also archive each agent's .env. The archive then CONTAINS CREDENTIALS and "
+             "must be handled as one",
+    )
+
+    restore_cmd = sub.add_parser("restore", help="restore a NOVA backup into this home")
+    restore_cmd.add_argument("archive", type=Path)
+    restore_cmd.add_argument("--dry-run", action="store_true")
+
+    reconcile_cmd = sub.add_parser(
+        "reconcile", help="diagnose what an interrupted run left unfinished"
+    )
+    reconcile_cmd.add_argument("bundle", type=Path)
+    reconcile_cmd.add_argument("--json", action="store_true")
+
+    audit_cmd = sub.add_parser("audit", help="inspect and protect the audit log")
+    audit_sub = audit_cmd.add_subparsers(dest="audit_command", required=True)
+
+    audit_seal = audit_sub.add_parser(
+        "seal", help="fingerprint the audit log so later tampering is detectable"
+    )
+    audit_seal.add_argument(
+        "destination", type=Path,
+        help="where to write the seal — keep it somewhere the runtime user cannot write, "
+             "or it proves nothing",
+    )
+    audit_verify = audit_sub.add_parser("verify", help="check the log against a seal")
+    audit_verify.add_argument("seal", type=Path)
+    audit_verify.add_argument("--json", action="store_true")
+
+    audit_status = audit_sub.add_parser("status", help="size, segments and retention")
+
     token = sub.add_parser("token", help="manage control-plane access")
     token_sub = token.add_subparsers(dest="token_command", required=True)
     token_new = token_sub.add_parser("new", help="mint a token and print the entry to add")
@@ -175,6 +224,148 @@ def _report(report, *, verb: str) -> None:
         print(f"  warning:  {warning}")
     if report.dry_run:
         print(f"\nNothing was written. Re-run `nova {verb}` without --dry-run to apply.")
+
+
+def _backup(args) -> int:
+    """``nova backup`` / ``nova restore`` — move the state NOVA owns, not the secrets."""
+    from nova.backup import create, restore
+
+    runtime = get_runtime(args.runtime, home=args.home)
+    home = runtime.state_location
+
+    if args.command == "restore":
+        report = restore(args.archive, home, dry_run=args.dry_run)
+        print(report.summary())
+        if report.manifest.includes_secrets:
+            print("  this archive contained credentials; they have been restored 0600")
+        for name in report.skipped:
+            print(f"  skipped (unsafe path): {name}")
+        for agent, names in sorted(report.missing_env.items()):
+            print(
+                f"  {agent}: still needs {', '.join(names)} — add them to "
+                f"{home / 'profiles' / agent / '.env'}"
+            )
+        if args.dry_run:
+            print("\nNothing was written. Re-run without --dry-run to restore.")
+        return 1 if report.missing_env and not args.dry_run else 0
+
+    bundle = load_bundle(args.bundle)
+    required = {}
+    for spec in bundle.agents:
+        row = runtime.deployment_readiness(spec, bundle.deployment)
+        if row.get("required"):
+            required[spec.id] = list(row["required"])
+
+    if args.include_secrets:
+        print(
+            "WARNING: --include-secrets means this archive CONTAINS CREDENTIALS.\n"
+            "         It is written 0600; treat every copy of it as a secret."
+        )
+    manifest = create(
+        home,
+        args.destination,
+        tenant_id=bundle.tenant_id,
+        agents=[spec.id for spec in bundle.agents],
+        required_env=required,
+        include_secrets=args.include_secrets,
+        never_archive=runtime.never_archive(),
+    )
+    print(f"backed up {manifest.files} file(s) to {args.destination}")
+    if not manifest.includes_secrets:
+        names = sorted({n for names in required.values() for n in names})
+        print(
+            f"  credentials are NOT included. After restoring, re-provision: "
+            f"{', '.join(names) or '(none needed)'}"
+        )
+    print("  not included: the work board, sessions, memories — the runtime's and the customer's")
+    return 0
+
+
+def _reconcile(args) -> int:
+    """``nova reconcile`` — what an interrupted run left, and whether it matters."""
+    from nova.reconcile import reconcile
+
+    bundle = load_bundle(args.bundle)
+    runtime = get_runtime(args.runtime, home=args.home, tenant_id=bundle.tenant_id)
+    audit = AuditLog.for_home(
+        runtime.state_location, tenant_id=bundle.tenant_id, actor="nova-cli"
+    )
+    result = reconcile(audit, bundle, runtime)
+
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0 if not result.actionable else 1
+
+    print(result.summary())
+    for finding in result.findings:
+        mark = "NEEDS APPLY" if finding.needs_action else finding.state
+        print(f"\n  [{mark}] {finding.kind} / {finding.subject or '(none)'}")
+        print(f"           started {finding.started_at}  correlation {finding.correlation_id}")
+        print(f"           {finding.detail}")
+    for warning in result.warnings:
+        print(f"  warning: {warning}")
+    return 1 if result.actionable else 0
+
+
+def _audit(args) -> int:
+    """``nova audit ...`` — keep the governance record finite and its edits visible."""
+    from nova.audit import AuditLog
+    from nova.audit.integrity import (
+        DEFAULT_KEEP, DEFAULT_MAX_BYTES, read_seal, seal, segments, verify, write_seal,
+    )
+
+    runtime = get_runtime(args.runtime, home=args.home)
+    log_path = AuditLog.for_home(runtime.state_location, tenant_id="").path
+
+    if args.audit_command == "status":
+        found = segments(log_path)
+        if not found:
+            print(f"no audit log at {log_path}")
+            return 0
+        total = sum(p.stat().st_size for p in found)
+        print(f"{log_path}")
+        for segment in found:
+            print(f"  {segment.name:24} {segment.stat().st_size / 1024:10.1f} KiB")
+        print(f"\n  {len(found)} segment(s), {total / 1024 / 1024:.1f} MiB total")
+        print(
+            f"  rotates past {DEFAULT_MAX_BYTES // 1024 // 1024} MiB, keeping "
+            f"{DEFAULT_KEEP} segments — so retention is bounded and OLD EVENTS ARE "
+            "DELETED.\n  A deployment with a retention obligation must ship events "
+            "off-host before they rotate."
+        )
+        return 0
+
+    if args.audit_command == "seal":
+        if not segments(log_path):
+            print(f"no audit log at {log_path}", file=sys.stderr)
+            return 1
+        written = write_seal(seal(log_path), args.destination)
+        document = read_seal(written)
+        print(f"sealed {document.lines} event(s) across {len(document.segments)} segment(s)")
+        print(f"  -> {written}")
+        print(
+            "\nThis seal is only worth where you keep it. Beside the log it proves little: "
+            "anyone who can rewrite one can rewrite the other. Move it to a host the "
+            "runtime user cannot reach."
+        )
+        return 0
+
+    # verify
+    result = verify(log_path, read_seal(args.seal))
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0 if result.ok else 1
+    if result.ok:
+        print(f"audit log matches the seal ({result.checked} segment(s) checked)")
+        if result.appended:
+            print(f"  {result.appended} event(s) appended since — expected on a running system")
+        for note in result.findings:
+            print(f"  note: {note}")
+        return 0
+    print(f"AUDIT LOG DOES NOT MATCH THE SEAL ({result.checked} segment(s) checked)")
+    for finding in result.findings:
+        print(f"  {finding}")
+    return 1
 
 
 def _token(args) -> int:
@@ -472,6 +663,7 @@ def _knowledge(args) -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    configure(level=args.log_level, fmt=args.log_format)
 
     try:
         if args.command == "validate":
@@ -527,6 +719,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "token":
             return _token(args)
+
+        if args.command == "audit":
+            return _audit(args)
+
+        if args.command == "reconcile":
+            return _reconcile(args)
+
+        if args.command in ("backup", "restore"):
+            return _backup(args)
 
         if args.command == "serve":
             from nova.control import ControlAPI, serve
@@ -591,9 +792,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print(f"\naudit: {audit.path}")
             open_intents = audit.open_intents()
             if open_intents:
+                # A count told an operator something was wrong and nothing about what.
                 print(
-                    f"WARNING: {len(open_intents)} unfinished change(s) in the audit log — "
-                    "a previous run was interrupted"
+                    f"WARNING: {len(open_intents)} unfinished change(s) in the audit log "
+                    "from an interrupted run.\n"
+                    f"         Run `nova reconcile {args.bundle}` to see which of them "
+                    "still need anything."
                 )
         return 0
 

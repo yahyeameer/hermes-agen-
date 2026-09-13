@@ -591,6 +591,24 @@ class AgentRuntime(ABC):
         is laid out is the adapter's business and nobody else's.
         """
 
+    def never_archive(self) -> tuple[str, ...]:
+        """File and directory names inside the state location that NOVA must not archive.
+
+        The runtime's own databases and the customer's conversation state: things NOVA
+        neither wrote nor can safely restore over. Empty by default, because an adapter
+        that names nothing is taken to own nothing — the safe reading, since the cost of
+        forgetting is copying a customer's session history into a backup.
+        """
+        return ()
+
+    def compatibility(self) -> list[str]:
+        """Warnings about the runtime version this adapter is talking to.
+
+        Empty by default: an adapter that makes no version claim is taken to make none,
+        which is the safe reading and the honest one.
+        """
+        return []
+
     def deployment_readiness(
         self,
         spec: AgentSpec,

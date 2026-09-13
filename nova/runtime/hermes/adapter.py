@@ -29,6 +29,7 @@ from nova.runtime.hermes import materialize as _materialize
 from nova.runtime.hermes import submit as _submit
 from nova.runtime.hermes import readiness as _readiness
 from nova.runtime.hermes import provider as _provider
+from nova.runtime.hermes import compat as _compat
 from nova.runtime.hermes import extract as _extract
 from nova.runtime.hermes import usage as _usage
 from nova.runtime.hermes.limits import LIMIT_FACTS
@@ -197,6 +198,23 @@ class HermesRuntime(AgentRuntime):
             result = _submit.submit(self.paths.home, items, dry_run=False)
             outcome.update(result.to_dict())
         return result
+
+    def never_archive(self) -> tuple[str, ...]:
+        """The runtime's own state, taken from the list the materializer already refuses
+        to write — one definition of "not NOVA's", used for both writing and archiving."""
+        return tuple(sorted(_materialize.NEVER_WRITE)) + (
+            "kanban.db", "kanban.db-wal", "kanban.db-shm",
+        )
+
+    def compatibility(self) -> list[str]:
+        """Warnings about running against an unverified runtime version.
+
+        A warning rather than a refusal: making a patch release of the runtime an outage
+        would be a worse failure than the one this prevents. What an operator needs is to
+        learn they are outside the verified range from NOVA, not from a worker that will
+        not start.
+        """
+        return _compat.check()
 
     def deployment_readiness(
         self,

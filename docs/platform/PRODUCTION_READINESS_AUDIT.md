@@ -24,15 +24,15 @@ Severity is about *deploying to a paying customer*, not about code quality:
 | 5 | No AWS deployment artifacts of any kind | AWS | **Blocking** |
 | 6 | ~~`credential_isolation=True` overclaims~~ | Enforcement | **FIXED** |
 | 7 | ~~Control plane returns every task regardless of tenant~~ | Isolation | **FIXED** |
-| 8 | Audit log: no rotation, no retention, unbounded growth | Observability | Hardening |
-| 9 | Audit log is writable by the process it audits | Security | Hardening |
-| 10 | Effectively no operational logging | Observability | Hardening |
-| 11 | Interrupted apply warns and never reconciles | Failure recovery | Hardening |
-| 12 | `PROVENANCE_VERSION` written but never checked | Upgrades | Hardening |
-| 13 | No runtime-version compatibility check | Upgrades | Hardening |
+| 8 | ~~Audit log: no rotation or retention~~ | Observability | **FIXED** |
+| 9 | ~~Audit log tampering undetectable~~ (evidence, not prevention) | Security | **FIXED** |
+| 10 | ~~Effectively no operational logging~~ | Observability | **FIXED** |
+| 11 | ~~Interrupted apply never reconciles~~ | Failure recovery | **FIXED** |
+| 12 | ~~`PROVENANCE_VERSION` never checked~~ | Upgrades | **FIXED** |
+| 13 | ~~No runtime-version compatibility check~~ | Upgrades | **FIXED** |
 | 14 | ~~Agent-level `max_task_runtime_seconds` ignored~~ | Enforcement | **FIXED** |
 | 15 | ~~Two limit classifications are stale~~ | Enforcement | **FIXED** |
-| 16 | No backup or restore story | Failure recovery | Hardening |
+| 16 | ~~No backup or restore story~~ | Failure recovery | **FIXED** |
 | 17 | Control API is read-only — no write path | Future |
 | 18 | No multi-tenancy | Future |
 | 19 | No cost ceiling (structurally impossible) | Future |
@@ -186,6 +186,12 @@ from the process environment on a host with more than one agent.
 ---
 
 ## Production-hardening
+
+> **All seven closed.** See the per-finding notes below. The one qualification worth
+> carrying forward: finding 9 delivers tamper *evidence*, not prevention — NOVA cannot stop
+> a process sharing its uid from rewriting a file, and a seal is only worth where it is
+> kept.
+
 
 ### 7. Control plane returns every task regardless of tenant — **FIXED**
 

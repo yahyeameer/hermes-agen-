@@ -27,8 +27,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
-#: Per-agent environment file. On ``materialize.NEVER_WRITE``: the operator owns it.
-ENV_FILENAME = ".env"
+# The parser lives in the platform layer: a dotenv file is a format, not a runtime
+# concept, and backup needs it too. Re-exported so this module's callers are unaffected.
+from nova._env import ENV_FILENAME, read_env_file  # noqa: E402,F401
 
 
 @dataclass(frozen=True)
@@ -115,21 +116,6 @@ def check(
     )
 
 
-def read_env_file(path: Path) -> dict[str, str]:
-    """Variable names defined in a dotenv file, with values discarded.
-
-    **Values are read and immediately dropped.** Only the presence of a name is ever
-    returned, so nothing in NOVA can accidentally log, audit or display a credential it
-    happened to parse on the way to answering "is this set?".
-
-    Deliberately a small parser rather than a dependency: NOVA loads with the standard
-    library and PyYAML, and the question here is only which keys exist.
-    """
-    names: dict[str, str] = {}
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return names
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):

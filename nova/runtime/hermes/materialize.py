@@ -126,6 +126,39 @@ class Provenance:
         }
 
 
+def check_provenance_version(
+    existing: Optional[Provenance], *, profile_dir: Path
+) -> list[str]:
+    """Refuse a marker written by a NOVA whose format this one does not understand.
+
+    ``PROVENANCE_VERSION`` was written and never compared, which made it decoration. The
+    two other version fields in NOVA both fail closed — ``POLICY_SCHEMA_VERSION`` in
+    :mod:`nova.policy.decide` and the knowledge index's schema — and a marker that silently
+    misreads is worse than either, because it decides whether NOVA owns a directory at all.
+
+    Newer is refused, older is migrated forward by rewriting. The asymmetry is deliberate:
+    this NOVA knows what an older format meant and cannot know what a newer one will mean,
+    and guessing at a format from the future is how a downgrade quietly destroys a profile
+    a newer NOVA is still managing.
+    """
+    if existing is None or existing.version == 0:
+        # 0 is the corrupt-marker sentinel, already handled as "owned, digest unknown".
+        return []
+    if existing.version > PROVENANCE_VERSION:
+        raise RuntimeAdapterError(
+            f"profile {profile_dir} was written by a newer NOVA (marker version "
+            f"{existing.version}; this NOVA understands {PROVENANCE_VERSION}). Refusing "
+            "rather than guessing at a format from the future — upgrade NOVA, or point "
+            "NOVA_HOME at a different directory"
+        )
+    if existing.version < PROVENANCE_VERSION:
+        return [
+            f"marker is version {existing.version}; rewriting it as "
+            f"{PROVENANCE_VERSION}"
+        ]
+    return []
+
+
 def check_tenant(
     existing: Optional[Provenance], tenant_id: str, *, agent_id: str, profile_dir: Path
 ) -> list[str]:
@@ -614,6 +647,7 @@ def materialize(
     # Before anything is written, and before the unchanged fast path below: adopting
     # another tenant's profile must be impossible, not merely reported afterwards.
     warnings.extend(check_tenant(existing, tenant_id, agent_id=spec.id, profile_dir=profile_dir))
+    warnings.extend(check_provenance_version(existing, profile_dir=profile_dir))
 
     created = not profile_dir.exists()
     # The policy is part of what an agent IS, so it belongs in the identity that decides

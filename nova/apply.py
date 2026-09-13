@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from nova.audit import AuditLog, new_correlation_id
+from nova.observability import operation, set_correlation_id
 from nova.policy import compile_policy
 from nova.runtime.base import AgentRuntime, MaterializeResult
 from nova.spec import TenantBundle
@@ -70,6 +71,41 @@ def apply_bundle(
     include_disabled: bool = False,
     correlation_id: Optional[str] = None,
 ) -> ApplyReport:
+    """Make ``runtime`` match ``bundle``. See :func:`_apply_bundle` for the behaviour.
+
+    This wrapper exists only to own the operational trace. Driving the context manager by
+    hand around the body would log the start and, on an exception, never log the failure —
+    which is the one thing the trace is for.
+    """
+    # Set before the trace opens, so the "started" line carries it too — otherwise a log
+    # shipper cannot group the pair, which is the one thing the id is for.
+    correlation_id = correlation_id or new_correlation_id()
+    set_correlation_id(correlation_id)
+
+    with operation(
+        "apply", tenant_id=bundle.tenant_id, runtime=runtime.name, dry_run=dry_run
+    ) as trace:
+        return _apply_bundle(
+            bundle,
+            runtime,
+            audit=audit,
+            dry_run=dry_run,
+            include_disabled=include_disabled,
+            correlation_id=correlation_id,
+            trace=trace,
+        )
+
+
+def _apply_bundle(
+    bundle: TenantBundle,
+    runtime: AgentRuntime,
+    *,
+    audit: AuditLog,
+    dry_run: bool,
+    include_disabled: bool,
+    correlation_id: Optional[str],
+    trace: operation,
+) -> ApplyReport:
     """Make ``runtime`` match ``bundle``.
 
     Disabled agents are skipped by default rather than materialized-and-ignored: leaving
@@ -80,8 +116,14 @@ def apply_bundle(
     operator action through :meth:`AgentRuntime.remove_agent`; a bundle that no longer
     names an agent produces a warning here, not a removal.
     """
+    # Already set by the caller above; the same id the audit log stamps, so an operational
+    # trace and a governance record line up without guessing from timestamps.
     correlation_id = correlation_id or new_correlation_id()
     warnings: list[str] = []
+
+    # Asked before anything is materialized: an adapter reaching into a schema that has
+    # moved should say so while the operator is still watching, not when a worker fails.
+    warnings.extend(runtime.compatibility())
 
     capability_gaps = runtime.capabilities.missing_for(["durable_tasks", "process_isolation"])
     if capability_gaps:
@@ -176,6 +218,14 @@ def apply_bundle(
 
     for result in results:
         warnings.extend(f"{result.agent_id}: {note}" for note in result.warnings)
+
+    trace.add(
+        created=len([r for r in results if r.created]),
+        changed=len([r for r in results if r.changed and not r.created]),
+        unchanged=len([r for r in results if r.unchanged]),
+        skipped=len(skipped),
+        warnings=len(warnings),
+    )
 
     orphans = _orphans(bundle, runtime)
     if orphans:

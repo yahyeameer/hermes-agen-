@@ -28,6 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional
 
+from nova.audit.integrity import DEFAULT_KEEP, DEFAULT_MAX_BYTES, rotate, segments
 from nova.errors import AuditError
 
 #: Event kinds that change what a model can see. Every one of these MUST pass through
@@ -103,10 +104,20 @@ class AuditLog:
     it back to make decisions.
     """
 
-    def __init__(self, path: Path | str, *, tenant_id: str, actor: str = "nova") -> None:
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        tenant_id: str,
+        actor: str = "nova",
+        max_bytes: int = DEFAULT_MAX_BYTES,
+        keep: int = DEFAULT_KEEP,
+    ) -> None:
         self.path = Path(path)
         self.tenant_id = tenant_id
         self.actor = actor
+        self.max_bytes = max_bytes
+        self.keep = keep
         self._lock = threading.Lock()
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -122,6 +133,18 @@ class AuditLog:
         line = event.to_json() + "\n"
         try:
             with self._lock:
+                # Checked before the write so the live segment never exceeds the bound by
+                # more than one event.
+                #
+                # Its own try/except, deliberately: inside the enclosing one, an OSError
+                # from rotation would be converted to AuditError and fail the append —
+                # contradicting the rule that housekeeping never blocks the record. A full
+                # disk must not also stop the record of why the disk filled.
+                if self.max_bytes:
+                    try:
+                        rotate(self.path, max_bytes=self.max_bytes, keep=self.keep)
+                    except OSError:
+                        pass
                 # O_APPEND so concurrent writers never interleave a partial line.
                 fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
                 try:
@@ -246,15 +269,25 @@ class AuditLog:
         )
 
     def read(self) -> list[AuditEvent]:
-        """Every event, oldest first. For tests and operator tooling."""
-        if not self.path.exists():
-            return []
+        """Every event, oldest first, across every rotated segment.
+
+        Spanning segments rather than reading one file is what keeps rotation invisible to
+        callers: ``open_intents`` must still find an intent whose commit landed after a
+        rotation, or rotating the log would manufacture unfinished changes that never
+        existed.
+        """
         events: list[AuditEvent] = []
-        with open(self.path, "r", encoding="utf-8") as handle:
-            for line in handle:
-                line = line.strip()
-                if line:
-                    events.append(AuditEvent.from_json(line))
+        for segment in segments(self.path):
+            try:
+                with open(segment, "r", encoding="utf-8") as handle:
+                    for line in handle:
+                        line = line.strip()
+                        if line:
+                            events.append(AuditEvent.from_json(line))
+            except OSError:
+                # A segment removed mid-read is expected under rotation; the rest is still
+                # a truthful answer to "what is in the log".
+                continue
         return events
 
     def open_intents(self) -> list[AuditEvent]:
