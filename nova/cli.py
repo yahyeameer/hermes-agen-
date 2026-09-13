@@ -200,6 +200,33 @@ def _build_parser() -> argparse.ArgumentParser:
 
     audit_status = audit_sub.add_parser("status", help="size, segments and retention")
 
+    work_cmd = sub.add_parser("work", help="act on work already on the board")
+    work_sub = work_cmd.add_subparsers(dest="work_command", required=True)
+
+    for name, helptext in (
+        ("release", "let a queued or held item through to run"),
+        ("resume", "return a held item to whatever phase it was in"),
+    ):
+        parser_ = work_sub.add_parser(name, help=helptext)
+        parser_.add_argument("bundle", type=Path)
+        parser_.add_argument("task_id")
+        parser_.add_argument("--reason", default="", help="recorded with the decision")
+        parser_.add_argument("--actor", default="", help="who is deciding (default: $USER)")
+
+    work_reject = work_sub.add_parser(
+        "reject", help="send an item awaiting review back, with a reason"
+    )
+    work_reject.add_argument("bundle", type=Path)
+    work_reject.add_argument("task_id")
+    work_reject.add_argument("--reason", required=True, help="what the worker must change")
+    work_reject.add_argument("--actor", default="")
+
+    work_note = work_sub.add_parser("note", help="attach a note a worker will read")
+    work_note.add_argument("bundle", type=Path)
+    work_note.add_argument("task_id")
+    work_note.add_argument("note")
+    work_note.add_argument("--actor", default="")
+
     deploy_cmd = sub.add_parser(
         "deploy", help="render infrastructure input from a bundle (never applies it)"
     )
@@ -687,6 +714,52 @@ def _knowledge(args) -> int:
     return 0
 
 
+#: How the CLI names a decision the operator asked for.
+_WORK_ACTIONS = {"release": "release", "resume": "resume", "reject": "reject", "note": "annotate"}
+
+
+def _work(args) -> int:
+    """``nova work`` — the same decisions the control plane offers, without a browser.
+
+    Both paths go through ``runtime.decide_work``, so the audit record is identical and
+    there is no "the CLI does it differently" to discover during an incident.
+    """
+    import getpass
+
+    from nova.audit import new_correlation_id
+
+    bundle = load_bundle(args.bundle)
+    runtime = get_runtime(args.runtime, home=args.home, tenant_id=bundle.tenant_id)
+
+    if not runtime.capabilities.work_decisions:
+        print(f"error: runtime {runtime.name!r} cannot act on work items", file=sys.stderr)
+        return 1
+
+    # Refused rather than defaulted to something anonymous: a decision recorded against
+    # "someone" is the exact failure identity exists to prevent.
+    actor = args.actor or (getpass.getuser() if hasattr(getpass, "getuser") else "")
+    if not actor:
+        print("error: could not determine who is deciding; pass --actor", file=sys.stderr)
+        return 1
+
+    audit = AuditLog.for_home(runtime.state_location, tenant_id=bundle.tenant_id, actor=actor)
+    decision = runtime.decide_work(
+        args.task_id,
+        _WORK_ACTIONS[args.work_command],
+        actor=actor,
+        audit=audit,
+        correlation_id=new_correlation_id(),
+        reason=getattr(args, "reason", "") or "",
+        note=getattr(args, "note", "") or "",
+    )
+    if decision.applied:
+        where = f" -> {decision.resulting_status}" if decision.resulting_status else ""
+        print(f"{decision.action} {decision.task_id}{where}   (by {actor})")
+        return 0
+    print(f"{decision.task_id}: {decision.reason}", file=sys.stderr)
+    return 1
+
+
 def _deploy(args) -> int:
     """``nova deploy`` — render, and refuse to apply.
 
@@ -827,6 +900,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "doctor":
             return _doctor(args)
+
+        if args.command == "work":
+            return _work(args)
 
         if args.command == "deploy":
             return _deploy(args)

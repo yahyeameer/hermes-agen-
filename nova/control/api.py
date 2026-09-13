@@ -5,9 +5,18 @@ globals — the transport is a thin adapter in :mod:`nova.control.server`, so th
 behaviour is tested directly and the transport can be replaced without touching any of
 this.
 
-Phase 1 serves five read-only routes. Every response is JSON-serialisable data assembled
+Phase 1 served five read-only routes. Every response is JSON-serialisable data assembled
 from the runtime adapter and the tenant bundle; nothing here knows which runtime is
 underneath.
+
+Phase 8 added writes, behind their own dispatcher. :meth:`ControlAPI.handle` still serves
+only reads and cannot reach a write handler however it is called — the two entry points are
+separate functions rather than one function branching on a method string, because a
+branch is a thing somebody eventually gets the wrong way round.
+
+Every write takes a :class:`~nova.control.auth.Principal`. Not a name, a principal: the
+route is checked against the caller's role *here*, not only in the transport, so a second
+transport cannot forget to.
 """
 
 from __future__ import annotations
@@ -16,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
 from nova import __version__
-from nova.audit import AuditLog
+from nova.audit import AuditLog, new_correlation_id
 from nova.errors import NovaError
 from nova.policy import agent_digest, compile_policy, decide
 from nova.policy.limits import ENFORCING_CLASSES
@@ -37,6 +46,19 @@ class Response:
     @property
     def ok(self) -> bool:
         return 200 <= self.status < 300
+
+
+def _write_route(tail: str) -> Optional[str]:
+    """The declared write route a concrete path belongs to, or None.
+
+    Concrete paths carry an identifier (``/work/abc123/decide``); the permission table is
+    keyed on the shape (``/work/decide``). Matching is exact on both ends rather than by
+    prefix, so a path that merely starts the right way cannot borrow the permission.
+    """
+    parts = [part for part in tail.split("/") if part]
+    if len(parts) == 3 and parts[0] in ("work", "objectives"):
+        return f"/{parts[0]}/{parts[2]}"
+    return None
 
 
 def _error(status: int, message: str, **extra: Any) -> Response:
@@ -62,6 +84,99 @@ class ControlAPI:
         self.bundle = bundle
         self.runtime = runtime
         self.audit = audit
+
+    # -- writes ---------------------------------------------------------------
+
+    def write(self, path: str, principal, payload: Mapping[str, Any]) -> Response:
+        """Dispatch one write. Separate from :meth:`handle` so a read cannot become one.
+
+        The principal is checked against :data:`~nova.control.auth.WRITE_ROUTES` here as
+        well as in the transport. Belt and braces on the one surface where being wrong
+        means an unauthorised *action* rather than an unauthorised read.
+        """
+        if not path.startswith(API_PREFIX):
+            return _error(404, f"no such route: {path}")
+        tail = path[len(API_PREFIX) :].rstrip("/") or "/"
+
+        route = _write_route(tail)
+        if route is None:
+            return _error(404, f"no such write route: {path}")
+        if not principal.may_write(route):
+            return _error(
+                403, f"role {principal.role!r} may not call this route", route=route
+            )
+        if self.audit is None:
+            # Refused, not degraded. A write path that can run without leaving a record is
+            # one somebody will run without leaving a record, and the whole value of an
+            # approval is the record that it happened.
+            return _error(
+                503,
+                "this control plane has no audit log, so it will not accept writes. "
+                "Start it with a runtime home NOVA can write an audit log into",
+            )
+
+        if route == "/work/decide":
+            return self._decide_work(tail, principal, payload)
+        return self._submit_objective(tail, principal, payload)
+
+    def _decide_work(self, tail: str, principal, payload: Mapping[str, Any]) -> Response:
+        from nova.runtime.base import WORK_ACTIONS
+
+        if not self.runtime.capabilities.work_decisions:
+            return _error(
+                501,
+                f"runtime {self.runtime.name!r} cannot act on work items, so this control "
+                "plane will not offer a button that does nothing",
+            )
+
+        task_id = tail[len("/work/") :].rsplit("/", 1)[0]
+        action = str(payload.get("action") or "").strip()
+        if action not in WORK_ACTIONS:
+            return _error(
+                400,
+                f"action must be one of {', '.join(WORK_ACTIONS)}",
+                given=action or None,
+            )
+        reason = str(payload.get("reason") or "").strip()
+        note = str(payload.get("note") or "").strip()
+
+        decision = self.runtime.decide_work(
+            task_id,
+            action,
+            actor=principal.name,
+            # Written as the human, not as the server. An auditor filtering on `actor`
+            # must see who decided; a process name there answers the wrong question.
+            audit=self.audit.with_actor(principal.name),
+            correlation_id=new_correlation_id(),
+            reason=reason,
+            note=note,
+        )
+        body = {**decision.to_dict(), "actor": principal.name}
+        # 409, not 400: the request was well-formed and the world disagreed. An operator
+        # whose second click is told "bad request" goes looking for a bug in the button.
+        return Response(200 if decision.applied else 409, body)
+
+    def _submit_objective(self, tail: str, principal, payload: Mapping[str, Any]) -> Response:
+        from nova.supervisor import submit_objective
+
+        objective_id = tail[len("/objectives/") :].rsplit("/", 1)[0]
+        try:
+            objective = next(o for o in self.bundle.objectives if o.id == objective_id)
+        except StopIteration:
+            known = ", ".join(sorted(o.id for o in self.bundle.objectives)) or "(none)"
+            return _error(404, f"no objective {objective_id!r}; declared: {known}")
+
+        dry_run = bool(payload.get("dry_run"))
+        report = submit_objective(
+            objective,
+            self.bundle.agents,
+            self.runtime,
+            audit=self.audit.with_actor(principal.name),
+            tenant_id=self.bundle.tenant_id,
+            dry_run=dry_run,
+        )
+        body = {**report.to_dict(), "actor": principal.name, "dry_run": dry_run}
+        return Response(200 if report.submitted or dry_run else 409, body)
 
     def _compiled(self, agent_id: str):
         """The compiled policy for one agent, or None when no policy is declared."""

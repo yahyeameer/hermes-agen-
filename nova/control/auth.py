@@ -59,6 +59,21 @@ ROUTE_ROLES: Mapping[str, str] = {
     "/budget": "admin",
 }
 
+#: Minimum role per *write* route, kept separate from :data:`ROUTE_ROLES` on purpose.
+#: Reading a route and changing what it describes are different permissions, and a single
+#: table would make them the same one by accident the first time somebody added an endpoint.
+#:
+#: A route absent from here cannot be written **at all** — not "requires admin", but
+#: unroutable. The default for a write has to be refusal: a read nobody meant to expose
+#: leaks, and a write nobody meant to expose acts.
+WRITE_ROUTES: Mapping[str, str] = {
+    # Acting on work already on the board: release it, send it back for changes, resume it,
+    # or leave a note a worker will read.
+    "/work/decide": "admin",
+    # Putting a declared objective's steps on the board.
+    "/objectives/submit": "admin",
+}
+
 #: The file, inside the runtime home, that lists who may call the control plane.
 PRINCIPALS_FILENAME = "control-principals.yaml"
 
@@ -83,6 +98,18 @@ class Principal:
     def may(self, route: str) -> bool:
         """Whether this principal may read ``route``. Unknown routes require admin."""
         required = ROUTE_ROLES.get(route, "admin")
+        return ROLES.index(self.role) >= ROLES.index(required)
+
+    def may_write(self, route: str) -> bool:
+        """Whether this principal may call the *write* route ``route``.
+
+        An undeclared route is refused outright rather than defaulted to admin. The
+        asymmetry with :meth:`may` is deliberate: forgetting to declare a read exposes
+        data, and forgetting to declare a write hands out an action.
+        """
+        required = WRITE_ROUTES.get(route)
+        if required is None:
+            return False
         return ROLES.index(self.role) >= ROLES.index(required)
 
     def to_dict(self) -> dict[str, Any]:

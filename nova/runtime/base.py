@@ -74,6 +74,10 @@ class RuntimeCapabilities:
     #: Per-agent tool policy is enforced inside the runtime, including escalation of
     #: business actions to a human. False means a declared policy would be inert.
     policy_enforcement: bool = False
+    #: A human can act on work that is already on the board: release it, send it back,
+    #: resume it, or leave a note a worker will read. False means the control plane stays
+    #: read-only, because an approval nobody can act on is a button that lies.
+    work_decisions: bool = False
     #: Branding can be projected into the runtime's own display surfaces.
     brand_projection: bool = False
 
@@ -325,6 +329,40 @@ class SubmittedItem:
         }
 
 
+#: What a human can do to a work item that already exists. Deliberately four, and
+#: deliberately not "set status to X": a control plane that can write any state can write an
+#: inconsistent one, and the runtime's own transitions are the only ones that keep its
+#: accounting straight.
+WORK_ACTIONS = ("release", "reject", "resume", "annotate")
+
+
+@dataclass(frozen=True)
+class WorkDecision:
+    """The outcome of one human decision about one work item.
+
+    ``applied=False`` with a ``reason`` is the normal, expected answer, not an error: a task
+    somebody already approved, or one that moved on while the operator was reading it, must
+    say so plainly rather than raising. The alternative is an operator clicking twice and
+    being told the second click crashed.
+    """
+
+    action: str
+    task_id: str
+    applied: bool
+    #: Why it did not apply, in words an operator can act on. Empty when it did.
+    reason: str = ""
+    #: The runtime's own word for where the item ended up, when it moved.
+    resulting_status: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        out = {"action": self.action, "task_id": self.task_id, "applied": self.applied}
+        if self.reason:
+            out["reason"] = self.reason
+        if self.resulting_status:
+            out["resulting_status"] = self.resulting_status
+        return out
+
+
 @dataclass(frozen=True)
 class SubmitResult:
     """What a submission did."""
@@ -571,6 +609,45 @@ class AgentRuntime(ABC):
         raise RuntimeAdapterError(
             f"runtime {self.name!r} cannot accept submitted work "
             "(capabilities.work_submission is False)"
+        )
+
+    def decide_work(
+        self,
+        task_id: str,
+        action: str,
+        *,
+        actor: str,
+        audit: AuditLog,
+        correlation_id: str,
+        reason: str = "",
+        note: str = "",
+    ) -> WorkDecision:
+        """Apply one human decision to one work item.
+
+        ``action`` is one of :data:`WORK_ACTIONS`:
+
+        ``release``   a queued or held item is let through to run.
+        ``reject``    an item awaiting review goes back to whoever produced it, with a reason.
+        ``resume``    a held item returns to whatever phase it was in.
+        ``annotate``  a note is attached that a worker will read.
+
+        ``actor`` is the authenticated human, and an implementation must carry it into
+        whatever record the runtime keeps. An approval that cannot name who approved is not
+        an approval, and this is the parameter that makes it one.
+
+        ``annotate`` is **model-visible**: the note becomes part of what a worker reads as
+        its instructions, exactly as a work item's body does. It goes through
+        ``audit.model_visible_change``. ``release``, ``reject`` and ``resume`` change *when*
+        a worker runs rather than *what it reads*, so they are recorded, not write-ahead —
+        the distinction is the whole basis of the audit's honesty, and blurring it in either
+        direction would make the log mean less.
+
+        The default refuses, for the same reason :meth:`submit_work` does: a runtime that
+        cannot act on work must not accept a decision and drop it.
+        """
+        raise RuntimeAdapterError(
+            f"runtime {self.name!r} cannot act on work items "
+            "(capabilities.work_decisions is False)"
         )
 
     @abstractmethod

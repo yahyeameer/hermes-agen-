@@ -64,14 +64,26 @@ def test_a_loopback_bind_needs_no_credentials(api):
     build_server(api, host="127.0.0.1", port=0).server_close()
 
 
-# -- read-only ---------------------------------------------------------------
+# -- the method surface ------------------------------------------------------
+#
+# Writes arrived in Phase 8, so "no method but GET" is no longer the invariant. What
+# replaces it is narrower and worth more: POST reaches only the routes declared in
+# WRITE_ROUTES, and the other write verbs are still refused before a handler runs.
+# The write path itself is tested in test_control_write.py.
 
 
-@pytest.mark.parametrize("method", ["POST", "PUT", "PATCH", "DELETE"])
-def test_write_methods_are_refused(live, method):
+@pytest.mark.parametrize("method", ["PUT", "PATCH", "DELETE"])
+def test_unused_write_methods_are_refused(live, method):
     status, body, _ = request(f"{live}/platform/v1/agents", method=method)
     assert status == 405
-    assert "read-only" in json.loads(body)["error"]["message"]
+    assert "only GET, HEAD and POST" in json.loads(body)["error"]["message"]
+
+
+def test_a_read_route_cannot_be_posted_to(live):
+    """`/agents` is a read. POSTing to it must not find a handler by accident — an
+    undeclared write path is unroutable, not merely admin-only."""
+    status, _, _ = request(f"{live}/platform/v1/agents", method="POST")
+    assert status in (404, 415)
 
 
 # -- auth --------------------------------------------------------------------

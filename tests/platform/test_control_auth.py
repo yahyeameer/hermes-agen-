@@ -254,17 +254,22 @@ def test_a_role_refusal_is_403_not_404(api, tmp_path):
         server.server_close()
 
 
-def test_writes_are_still_refused_for_every_principal(api, tmp_path):
+def test_a_read_route_is_not_writable_by_any_principal(api, tmp_path):
+    """Phase 8 opened POST, but only onto declared write routes. An admin posting to a
+    read route gets nowhere — which is the point of keeping the two tables apart."""
     store = PrincipalStore.load(principals_file(tmp_path, ("ops", "admin", new_token())))
     server = build_server(api, host="127.0.0.1", port=0, principals=store)
     try:
         port = serve_in_thread(server)
         request = urllib.request.Request(
-            f"http://127.0.0.1:{port}/platform/v1/agents", method="POST", data=b"{}"
+            f"http://127.0.0.1:{port}/platform/v1/agents",
+            method="POST",
+            data=b"{}",
+            headers={"Content-Type": "application/json"},
         )
         with pytest.raises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(request, timeout=5)
-        assert caught.value.code == 405
+        assert caught.value.code == 404
     finally:
         server.shutdown()
         server.server_close()

@@ -164,7 +164,10 @@ Rules:
 2. The Control API reads runtime state through **read models** — a read-only connection to
    `kanban.db`, `task_events`, `task_runs`, and the usage tables — never by scraping logs.
 3. The Control API writes through **narrow typed commands** that map onto existing kernel
-   functions. Arbitrary subprocess spawn from a web handler is forbidden.
+   functions. Arbitrary subprocess spawn from a web handler is forbidden. *Implemented in
+   Phase 8*: four verbs (`release`, `reject`, `resume`, `annotate`) plus objective
+   submission, each asking the runtime for a transition it already owns rather than writing
+   a status — a control plane that can write any state can write an inconsistent one.
 4. The Hermes dashboard and CLI stay, bound to localhost, for engineering and debugging.
 5. A future `nova` CLI covers platform and deployment operations only. **Do not re-implement the
    Hermes CLI.**

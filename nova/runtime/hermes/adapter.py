@@ -23,10 +23,12 @@ from nova.runtime.base import (
     SubmitResult,
     TaskView,
     UsageSummary,
+    WorkDecision,
     WorkItem,
 )
 from nova.runtime.hermes import materialize as _materialize
 from nova.runtime.hermes import submit as _submit
+from nova.runtime.hermes import decide as _decide
 from nova.runtime.hermes import readiness as _readiness
 from nova.runtime.hermes import provider as _provider
 from nova.runtime.hermes import compat as _compat
@@ -57,6 +59,10 @@ from nova.spec import AgentSpec, IdentitySpec
 #: ``policy_enforcement`` is True: policy compiles to a plugin on the runtime's documented
 #: pre-tool-call hook, which vetoes a call or escalates it to the same human gate that
 #: guards dangerous shell commands — and that gate fails closed with no human present.
+#: ``work_decisions`` is True: the runtime already has a review gate and an operator
+#: promotion path (``request_changes``, ``promote_task``, ``unblock_task``, ``add_comment``),
+#: each with its own state machine and its own event rows. NOVA asks for a transition and
+#: lets the runtime refuse an illegal one, rather than writing a status itself.
 HERMES_CAPABILITIES = RuntimeCapabilities(
     durable_tasks=True,
     worktree_isolation=True,
@@ -67,6 +73,7 @@ HERMES_CAPABILITIES = RuntimeCapabilities(
     document_extraction=True,
     work_submission=True,
     policy_enforcement=True,
+    work_decisions=True,
     brand_projection=True,
 )
 
@@ -198,6 +205,48 @@ class HermesRuntime(AgentRuntime):
             result = _submit.submit(self.paths.home, items, dry_run=False)
             outcome.update(result.to_dict())
         return result
+
+    def decide_work(
+        self,
+        task_id: str,
+        action: str,
+        *,
+        actor: str,
+        audit: AuditLog,
+        correlation_id: str,
+        reason: str = "",
+        note: str = "",
+    ) -> WorkDecision:
+        detail = {"runtime": self.name, "action": action, "actor": actor, "task_id": task_id}
+        if reason:
+            detail["reason"] = reason
+
+        # A note becomes part of what a worker reads. Everything else changes *when* a
+        # worker runs, not *what it reads* — so only the first is write-ahead. Blurring
+        # that line in either direction makes "model-visible means logged" mean less.
+        if action == "annotate":
+            with audit.model_visible_change(
+                "work.annotated",
+                correlation_id=correlation_id,
+                subject=task_id,
+                detail={**detail, "note_length": len(note)},
+            ) as outcome:
+                decision = _decide.decide(
+                    self.paths.home, task_id, action, actor=actor, reason=reason, note=note
+                )
+                outcome.update(decision.to_dict())
+            return decision
+
+        decision = _decide.decide(
+            self.paths.home, task_id, action, actor=actor, reason=reason, note=note
+        )
+        audit.record(
+            "work.decided",
+            correlation_id=correlation_id,
+            subject=task_id,
+            detail={**detail, **decision.to_dict()},
+        )
+        return decision
 
     def never_archive(self) -> tuple[str, ...]:
         """The runtime's own state, taken from the list the materializer already refuses

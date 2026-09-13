@@ -5,10 +5,19 @@ The handlers in :mod:`nova.control.api` hold all the behaviour; this module only
 bytes, which is what makes swapping in a production server later a contained change
 rather than a rewrite.
 
-Two safety properties, both tested:
+Safety properties, all tested:
 
-**Read-only.** Only GET and HEAD are served. Every other method is refused with 405
-before any handler runs, so no write path can be reached even by accident.
+**Writes are a declared surface, not an open door.** POST is served only for the routes in
+``auth.WRITE_ROUTES``; PUT, PATCH and DELETE are refused with 405 before any handler runs.
+An undeclared write path is a 404, not an admin-only 403 — forgetting to declare a read
+exposes data, and forgetting to declare a write hands out an action.
+
+**Cross-site requests cannot act.** A loopback caller is a local admin, which was harmless
+while everything was a read and is not harmless now: any page in the operator's browser can
+make their browser POST to ``127.0.0.1``. Three things stop it, and each blocks a different
+technique — a JSON content type (an HTML form cannot send one), a same-origin check on any
+``Origin`` header, and no CORS preflight answer at all (so a scripted cross-origin fetch
+never gets to send the real request).
 
 **No accidental exposure.** Binding to anything other than loopback requires both
 authentication and transport security. A control plane that lists a customer's agents and
@@ -34,6 +43,12 @@ from urllib.parse import parse_qs, urlparse
 from nova.control.api import ControlAPI
 from nova.control.auth import LOCAL_ADMIN, API_PREFIX_LEN, Principal, PrincipalStore
 from nova.errors import NovaError
+
+#: Largest write body accepted. A decision is a few hundred bytes; a note that needs more
+#: than this is a document, and belongs in the knowledge base rather than a comment field.
+#: Checked from the header before anything is read, so an oversized body costs one refusal
+#: rather than a buffer.
+MAX_BODY_BYTES = 64 * 1024
 
 logger = logging.getLogger("nova.control")
 
@@ -126,13 +141,133 @@ class _Handler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802 — stdlib signature
         self._handle()
 
-    def _reject_write(self) -> None:
+    def _reject_method(self) -> None:
         self._send_json(
             405,
-            {"error": {"status": 405, "message": "the control API is read-only in this release"}},
+            {
+                "error": {
+                    "status": 405,
+                    "message": "only GET, HEAD and POST are served by the control API",
+                }
+            },
         )
 
-    do_POST = do_PUT = do_PATCH = do_DELETE = _reject_write  # noqa: N815 — stdlib names
+    do_PUT = do_PATCH = do_DELETE = _reject_method  # noqa: N815 — stdlib names
+
+    def do_OPTIONS(self) -> None:  # noqa: N802 — stdlib signature
+        """Deliberately unhelpful.
+
+        Answering a CORS preflight is what would let a page on another origin send a real
+        cross-site POST. There is no browser client for this API other than the dashboard,
+        which is same-origin and needs no preflight, so the correct answer is 405.
+        """
+        self._reject_method()
+
+    def _cross_site(self) -> str:
+        """Why this request looks cross-site, or "" if it does not.
+
+        Only the ``Origin`` header is consulted, and only when present. ``Referer`` is
+        stripped by privacy tooling often enough that requiring it would break real
+        operators, and a missing ``Origin`` on a same-origin non-form request is normal.
+        The content-type requirement below is what covers the form case, where ``Origin``
+        is sent but the request is one a form could have made.
+        """
+        origin = self.headers.get("Origin", "")
+        if not origin:
+            return ""
+        host = self.headers.get("Host", "")
+        for scheme in ("http://", "https://"):
+            if origin == f"{scheme}{host}":
+                return ""
+        return f"Origin {origin!r} does not match Host {host!r}"
+
+    def do_POST(self) -> None:  # noqa: N802 — stdlib signature
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if not path.startswith("/platform/"):
+            self._send_json(404, {"error": {"status": 404, "message": "not found"}})
+            return
+
+        principal = self._principal()
+        if principal is None:
+            self._send_json(
+                401, {"error": {"status": 401, "message": "missing or invalid token"}}
+            )
+            return
+
+        reason = self._cross_site()
+        if reason:
+            logger.warning("refused cross-site write from %s: %s", principal.name, reason)
+            self._send_json(
+                403,
+                {
+                    "error": {
+                        "status": 403,
+                        "message": f"refusing a cross-site write: {reason}",
+                    }
+                },
+            )
+            return
+
+        # An HTML form can only send urlencoded, multipart or text/plain, so requiring JSON
+        # is what stops a form on another page from driving this API through the operator's
+        # own browser and their own loopback admin rights.
+        content_type = (self.headers.get("Content-Type", "").split(";")[0] or "").strip()
+        if content_type != "application/json":
+            self._send_json(
+                415,
+                {
+                    "error": {
+                        "status": 415,
+                        "message": "writes must be sent as application/json",
+                    }
+                },
+            )
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0") or 0)
+        except ValueError:
+            length = -1
+        if length < 0:
+            self._send_json(
+                400, {"error": {"status": 400, "message": "a malformed Content-Length"}}
+            )
+            return
+        if length > MAX_BODY_BYTES:
+            self._send_json(
+                413,
+                {
+                    "error": {
+                        "status": 413,
+                        "message": f"a write body may not exceed {MAX_BODY_BYTES} bytes",
+                    }
+                },
+            )
+            return
+
+        raw = self.rfile.read(length) if length else b"{}"
+        try:
+            payload = json.loads(raw.decode("utf-8") or "{}")
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            self._send_json(
+                400, {"error": {"status": 400, "message": f"body is not valid JSON: {exc}"}}
+            )
+            return
+        if not isinstance(payload, dict):
+            self._send_json(
+                400, {"error": {"status": 400, "message": "body must be a JSON object"}}
+            )
+            return
+
+        logger.info("%s POST %s", principal.name, path)
+        try:
+            response = self.api.write(path, principal, payload)
+        except NovaError as exc:
+            self._send_json(500, {"error": {"status": 500, "message": str(exc)}})
+            return
+        self._send_json(response.status, response.body)
 
     def _handle(self) -> None:
         parsed = urlparse(self.path)

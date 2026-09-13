@@ -47,6 +47,10 @@ MODEL_VISIBLE_KINDS: frozenset[str] = frozenset(
         # A work item's title and body are read by a worker as its instructions. Placing
         # one on the board is therefore model-visible in the most direct sense there is.
         "work.submitted",
+        # An operator's note lands in the same place and is read the same way. Releasing,
+        # rejecting or resuming an item changes *when* a worker runs rather than *what it
+        # reads*, so those are recorded rather than write-ahead — see `AgentRuntime.decide_work`.
+        "work.annotated",
     }
 )
 
@@ -123,6 +127,26 @@ class AuditLog:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise AuditError(f"cannot create audit log directory {self.path.parent}: {exc}") from exc
+
+    def with_actor(self, actor: str) -> "AuditLog":
+        """The same log, written as somebody else.
+
+        The control plane needs this and nothing else does. A long-running server is one
+        process writing on behalf of many people, and an event whose ``actor`` is the
+        process rather than the person answers "what happened" but not "who decided" — the
+        question an approval exists to answer. The alternative, leaving the human in
+        ``detail`` only, means an auditor filtering on ``actor`` silently sees none of them.
+
+        Shares the lock and the path deliberately: two instances writing the same file with
+        separate locks would interleave within a process, which is the one case the lock is
+        there to prevent.
+        """
+        if not actor:
+            raise AuditError("an audit actor cannot be empty")
+        clone = object.__new__(type(self))
+        clone.__dict__.update(self.__dict__)
+        clone.actor = actor
+        return clone
 
     @classmethod
     def for_home(cls, home: Path, *, tenant_id: str, actor: str = "nova") -> "AuditLog":

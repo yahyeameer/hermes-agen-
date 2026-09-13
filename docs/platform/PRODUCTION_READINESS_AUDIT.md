@@ -33,7 +33,7 @@ Severity is about *deploying to a paying customer*, not about code quality:
 | 14 | ~~Agent-level `max_task_runtime_seconds` ignored~~ | Enforcement | **FIXED** |
 | 15 | ~~Two limit classifications are stale~~ | Enforcement | **FIXED** |
 | 16 | ~~No backup or restore story~~ | Failure recovery | **FIXED** |
-| 17 | Control API is read-only — no write path | Future |
+| 17 | ~~Control API is read-only — no write path~~ | Future | **DONE** |
 | 18 | No multi-tenancy | Future |
 | 19 | No cost ceiling (structurally impossible) | Future |
 | 20 | No semantic retrieval | Future |
@@ -343,9 +343,11 @@ Worth recording, because these were claims and are now evidence:
 
 ## Future capability — absent by decision
 
-1. **Control API writes.** Read-only today. Approvals, retries and objective submission from
-   the dashboard all need finding 3 (identity) first — an approval with no identity is not an
-   approval.
+1. ~~**Control API writes.**~~ **Built in Phase 8** ([`PHASE_8.md`](PHASE_8.md)), once
+   finding 3 made it possible. Four verbs — release, reject, resume, annotate — plus
+   objective submission, each gated on an admin principal, each recorded against the human
+   who made it, and each asking the runtime for a transition rather than writing a status.
+   The dashboard's *browser* UI is still read-only; the API and the CLI are not.
 2. **Multi-tenancy.** One deployment per customer is the design. Finding 4 is about enforcing
    that boundary, not removing it.
 3. **A cost ceiling.** Structurally impossible on this runtime: LLM-boundary hooks discard
