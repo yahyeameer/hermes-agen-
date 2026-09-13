@@ -162,28 +162,90 @@ def test_unknown_static_path_is_404(live):
 # -- the control-plane boundary ----------------------------------------------
 
 
-def test_dashboard_only_ever_calls_the_control_api():
-    """The dashboard must never reach a runtime endpoint. This is the boundary in §5."""
-    source = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
-    fetches = re.findall(r"fetch\(([^)]*)\)", source)
-    assert fetches, "expected the dashboard to call the API"
-    for call in fetches:
-        assert "API +" in call, f"dashboard fetch does not go through the API prefix: {call}"
-    assert 'const API = "/platform/v1"' in source
+#: The dashboard's TypeScript source. The built bundle is what ships, but the *source* is
+#: what a reviewer reads and what these boundary tests must hold against — a minified bundle
+#: carrying React's own internals cannot be asserted on usefully.
+UI_SRC = ROOT / "nova" / "control" / "ui" / "src"
 
 
-def _js_without_comments(source: str) -> str:
+def ui_sources() -> list[Path]:
+    return sorted(p for p in UI_SRC.rglob("*.ts*") if p.is_file())
+
+
+def _ts_without_comments(source: str) -> str:
     """Strip /* */ and // comments. Prose may mention a footgun; code may not use it."""
     source = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
     return re.sub(r"(?m)^\s*//.*$", "", source)
 
 
+def test_dashboard_only_ever_calls_the_control_api():
+    """The dashboard must never reach a runtime endpoint. This is the boundary in §5.
+
+    Asserted two ways because they fail differently: the source must route every fetch
+    through the one API constant, and the *built* bundle must contain no absolute origin —
+    which catches a dependency that phones home as well as a hand-written mistake.
+    """
+    api_module = (UI_SRC / "lib" / "api.ts").read_text(encoding="utf-8")
+    assert 'export const API = "/platform/v1"' in api_module
+
+    for path in ui_sources():
+        code = _ts_without_comments(path.read_text(encoding="utf-8"))
+        for call in re.findall(r"fetch\(([^)]*)\)", code):
+            assert "${API}" in call, f"{path.name}: fetch does not go through the API prefix: {call}"
+
+    # Origins that appear in the bundle as *text* rather than as a request: XML namespace
+    # identifiers React writes into SVG elements, and the documentation link React puts in
+    # its own error messages. Neither is ever fetched. Anything else — a CDN, a font host,
+    # a telemetry endpoint — must fail, because the control plane has to work on an
+    # isolated network.
+    NOT_REQUESTS = ("http://www.w3.org", "https://www.w3.org", "https://react.dev")
+    for bundle in (STATIC_DIR / "assets").glob("*.js"):
+        text = bundle.read_text(encoding="utf-8", errors="ignore")
+        for origin in set(re.findall(r"https?://[a-zA-Z0-9.-]+", text)):
+            assert origin.startswith(NOT_REQUESTS), (
+                f"built dashboard references an external origin: {origin}"
+            )
+
+
 def test_dashboard_never_injects_api_data_as_markup():
-    """Task titles and agent names are customer-controlled strings, never markup."""
-    code = _js_without_comments((STATIC_DIR / "app.js").read_text(encoding="utf-8"))
-    assert "innerHTML" not in code
-    assert "insertAdjacentHTML" not in code
-    assert "document.write" not in code
+    """Task titles and channel names are customer-controlled strings, never markup.
+
+    React escapes interpolated text by default, so the whole risk collapses to one escape
+    hatch. Keeping the raw-DOM names in the assertion too: a future component that reaches
+    for `innerHTML` directly would bypass React's escaping just as effectively.
+    """
+    for path in ui_sources():
+        code = _ts_without_comments(path.read_text(encoding="utf-8"))
+        for hatch in ("dangerouslySetInnerHTML", "innerHTML", "insertAdjacentHTML", "document.write"):
+            assert hatch not in code, f"{path.name} uses {hatch}"
+
+
+def test_the_dashboard_needs_no_csp_relaxation():
+    """Radix positions a tooltip by writing through the CSSOM, which CSP does not restrict —
+    so the strict policy that shipped before the rewrite still ships after it.
+
+    Pinned as a test because the tempting fix for a mispositioned popover is
+    ``style-src 'unsafe-inline'``, and that would be a real regression made for a cosmetic
+    reason. Verified in a browser: the page produces zero CSP violations while a deliberate
+    inline-style probe on the same page is refused.
+    """
+    from nova.control.server import SECURITY_HEADERS
+
+    policy = SECURITY_HEADERS["Content-Security-Policy"]
+    assert "script-src 'self'" in policy
+    assert "style-src 'self'" in policy
+    assert "unsafe-inline" not in policy
+    assert "unsafe-eval" not in policy
+
+
+def test_the_built_dashboard_is_committed():
+    """The control server is a stdlib file server: it cannot build anything. Whatever is in
+    ``static/`` is what an operator gets, so the build output is committed deliberately."""
+    index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assets = list((STATIC_DIR / "assets").glob("*.js"))
+    assert assets, "no built dashboard bundle is present"
+    for asset in assets:
+        assert asset.name in index, f"{asset.name} is not referenced by index.html (stale build?)"
 
 
 def test_dashboard_has_no_external_dependencies():
