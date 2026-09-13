@@ -227,6 +227,7 @@ in the patch budget can genuinely conflict.
 | `test_platform_layer_never_imports_the_runtime_at_module_level` | §1 — NOVA loads with only the stdlib and PyYAML, adapters included |
 | `test_only_an_adapter_may_import_the_runtime_lazily` | §1 — a borrowed runtime capability stays inside `nova/runtime/<adapter>/` |
 | `test_the_adapter_packages_still_import_without_their_runtime` | §1 — proves the lazy import stayed lazy, in a subprocess |
+| `tests/platform/test_plugin_activation.py` | §3 — a plugin NOVA installs is enabled, registers its hook, and is permitted by the policy guarding it |
 | Patch-budget check | §7 — an upstream-owned file changed without a ledger entry fails CI |
 | `merge=brandours` in `.gitattributes` | §8 — brand-owned files resolve without manual attention |
 
@@ -243,5 +244,9 @@ in the patch budget can genuinely conflict.
    search by telling the model which corpora it may read rather than filtering in SQL.
 7. Writing a second decomposer, scheduler or task store because the runtime's was not
    shaped exactly like NOVA's model of one — or writing `kanban.db` with raw SQL.
+8. Shipping a control whose only evidence is a unit test that calls NOVA's own code. Every
+   seam with the runtime — plugin enablement, hook registration, tool availability — has to
+   be proven in a live worker, because each of those failed silently once already
+   (`LIVE_RUN.md`).
 
 If a change you are about to make matches one of these, stop and re-read §3.

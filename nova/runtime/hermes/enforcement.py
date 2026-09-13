@@ -161,3 +161,23 @@ def pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None, **
         return {"action": "block", "message": f"BLOCKED by NOVA policy: {decision.reason}"}
 
     return None
+
+
+# -- registration -----------------------------------------------------------
+
+
+def register(ctx: Any) -> None:
+    """Wire the policy hook. Called once by the runtime's plugin loader.
+
+    Declaring ``hooks: [pre_tool_call]`` in the manifest is documentation, not wiring: the
+    loader calls ``register(ctx)`` and the plugin registers its own callbacks. Without this
+    function the loader logs "no register() function", the plugin loads, registers nothing,
+    and every tool call proceeds unchecked — a governance control that is installed,
+    correct, and never consulted.
+
+    That was the state of this plugin until a live worker run proved it. Unit tests called
+    :func:`pre_tool_call` directly, which tested the decision and never tested that anything
+    would ever call it; ``tests/platform/test_policy_enforcement.py`` now asserts the
+    registration itself.
+    """
+    ctx.register_hook("pre_tool_call", pre_tool_call)

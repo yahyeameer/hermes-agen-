@@ -26,6 +26,11 @@ from nova.spec import AgentSpec
 #: allowed to do, so they are excluded from the agent's identity.
 RUNTIME_INJECTED_KEYS = frozenset({"audit_log", "tenant_id"})
 
+#: The tool NOVA installs for an agent granted knowledge sources. Named here rather
+#: than imported from the adapter: the compiler is runtime-agnostic, and this is the
+#: NOVA-side name of the capability, not one runtime's implementation of it.
+KNOWLEDGE_TOOL = "knowledge_search"
+
 
 @dataclass(frozen=True)
 class CompiledPolicy:
@@ -57,6 +62,15 @@ def compile_policy(spec: AgentSpec, policy: PolicySpec) -> CompiledPolicy:
 
     # Tools this agent is granted, from its permissions and its explicit allow list.
     granted = policy.tools_for_permissions(spec.permissions) | set(spec.tools.allow)
+
+    # Declaring knowledge sources IS the authorization to search them. Requiring a second,
+    # separate tool permission would mean a tenant grants an agent a corpus, NOVA installs
+    # the search tool, and NOVA's own policy then refuses every call to it — which is
+    # exactly what happened in a live worker before this line existed. A trap that only
+    # fires under an allow-list, where the failure reads as a knowledge bug rather than a
+    # policy one. An explicit deny still wins below, so a tenant can revoke it.
+    if spec.knowledge.sources:
+        granted.add(KNOWLEDGE_TOOL)
 
     unknown_permissions = [name for name in spec.permissions if name not in policy.permissions]
     if unknown_permissions:

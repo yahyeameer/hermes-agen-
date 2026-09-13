@@ -18,6 +18,7 @@ the authoritative boundary definition.
 | `docs/platform/PHASE_3.md` | Budget controls: what is enforced, what is only observed, and why |
 | `docs/platform/PHASE_4.md` | Knowledge: declared corpora, scoped retrieval, and the trust boundary around it |
 | `docs/platform/PHASE_5.md` | Supervisor: objectives routed under the tenant's delegation policy |
+| `docs/platform/LIVE_RUN.md` | The end-to-end worker run, the four defects it found, and the gap it left |
 | `docs/platform/BUDGET_ENFORCEMENT_AUDIT.md` | What the runtime exposes for usage and limits, and which of it is enforceable |
 | `docs/platform/KNOWLEDGE_CAPABILITY_AUDIT.md` | What exists for knowledge, retrieval and documents; what to reuse versus build |
 | `docs/platform/CORE_PATCHES.md` | The patch budget — every upstream file touched, and why |
