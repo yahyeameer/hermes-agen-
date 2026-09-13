@@ -32,6 +32,7 @@ from nova.errors import RuntimeAdapterError
 from nova.policy import CompiledPolicy, agent_digest
 from nova.runtime.base import MaterializeResult
 from nova.runtime.hermes.paths import HermesPaths
+from nova.knowledge.sources import KnowledgeCatalog
 from nova.spec import AgentSpec, IdentitySpec
 
 #: Filenames inside a profile that belong to the customer or the runtime. NOVA never
@@ -65,6 +66,13 @@ PLUGIN_MANIFEST = Path(__file__).parent / "plugin_manifest.yaml"
 PLUGIN_ENTRY = Path(__file__).parent / "enforcement.py"
 #: The pure decision module, copied beside it so the same code decides in both places.
 PLUGIN_DECIDE = Path(__file__).parents[2] / "policy" / "decide.py"
+
+#: The knowledge plugin, installed only for agents that were granted a corpus.
+KNOWLEDGE_MANIFEST = Path(__file__).parent / "knowledge_manifest.yaml"
+KNOWLEDGE_ENTRY = Path(__file__).parent / "knowledge_tool.py"
+#: The pure query module, copied beside it — same arrangement as the policy plugin, and for
+#: the same reason: one definition of how a question becomes a safe FTS5 expression.
+KNOWLEDGE_QUERY = Path(__file__).parents[2] / "knowledge" / "query.py"
 
 
 @dataclass(frozen=True)
@@ -268,11 +276,54 @@ def build_persona(spec: AgentSpec, identity: Optional[IdentitySpec]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+def build_knowledge_config(
+    spec: AgentSpec,
+    paths: HermesPaths,
+    catalog: Optional[KnowledgeCatalog],
+    *,
+    tenant_id: str = "",
+    audit_log: Optional[Path] = None,
+) -> Optional[dict[str, Any]]:
+    """This agent's knowledge grant, as the plugin will read it. None when it has no corpora.
+
+    Resolving the grant here rather than in the plugin is what makes the scope enforceable:
+    by the time the worker process starts, the list of readable corpora is a fact on disk
+    that the model's side of the boundary never participated in producing.
+
+    A source the agent names but the tenant has not declared is dropped rather than
+    fabricated. Bundle loading already rejects that case, so reaching this code means
+    something bypassed validation — and inventing a corpus id at materialization time would
+    turn a configuration error into a tool that searches nothing and says nothing about why.
+    """
+    if catalog is None or not spec.knowledge.sources:
+        return None
+    granted = catalog.subset(spec.knowledge.sources)
+    if not granted:
+        return None
+    return {
+        "version": 1,
+        "agent_id": spec.id,
+        "tenant_id": tenant_id,
+        "index_path": str(paths.knowledge_index),
+        "audit_log": str(audit_log) if audit_log else "",
+        "sources": [
+            {
+                "id": source.id,
+                "title": source.display_title,
+                "description": source.description,
+                "classification": source.classification,
+            }
+            for source in granted
+        ],
+    }
+
+
 def plan_writes(
     spec: AgentSpec,
     paths: HermesPaths,
     identity: Optional[IdentitySpec],
     policy: Optional[CompiledPolicy] = None,
+    knowledge: Optional[dict[str, Any]] = None,
 ) -> dict[Path, str]:
     """Every file this materialization would write, as path -> content.
 
@@ -286,7 +337,7 @@ def plan_writes(
         # The recorded digest must cover everything materialization depends on, policy
         # included, or a re-apply compares against a digest it can never match and
         # reports every agent as changed forever.
-        digest=_combined_digest(spec, policy),
+        digest=_combined_digest(spec, policy, knowledge),
         nova_version=_nova_version(),
     )
     writes = {
@@ -299,11 +350,23 @@ def plan_writes(
     # one there is nothing to enforce, and installing a plugin that would deny everything
     # on a missing document would break every agent that predates governance.
     if policy is not None:
-        plugin_dir = paths.plugin_dir(spec.id)
+        plugin_dir = paths.policy_plugin_dir(spec.id)
         writes[paths.policy_path(spec.id)] = json.dumps(policy.document, indent=2, sort_keys=True) + "\n"
         writes[plugin_dir / "plugin.yaml"] = PLUGIN_MANIFEST.read_text(encoding="utf-8")
         writes[plugin_dir / "__init__.py"] = PLUGIN_ENTRY.read_text(encoding="utf-8")
         writes[plugin_dir / "_decide.py"] = PLUGIN_DECIDE.read_text(encoding="utf-8")
+
+    # The knowledge plugin is likewise installed ONLY for an agent that was granted a
+    # corpus. An agent with no grant keeps no knowledge tool and no configuration file, so
+    # the capability is invisible to it rather than present and empty.
+    if knowledge:
+        knowledge_dir = paths.knowledge_plugin_dir(spec.id)
+        writes[paths.knowledge_config_path(spec.id)] = (
+            json.dumps(knowledge, indent=2, sort_keys=True) + "\n"
+        )
+        writes[knowledge_dir / "plugin.yaml"] = KNOWLEDGE_MANIFEST.read_text(encoding="utf-8")
+        writes[knowledge_dir / "__init__.py"] = KNOWLEDGE_ENTRY.read_text(encoding="utf-8")
+        writes[knowledge_dir / "_query.py"] = KNOWLEDGE_QUERY.read_text(encoding="utf-8")
 
     return writes
 
@@ -320,6 +383,7 @@ def materialize(
     *,
     identity: Optional[IdentitySpec] = None,
     policy: Optional[CompiledPolicy] = None,
+    knowledge: Optional[dict[str, Any]] = None,
     dry_run: bool = False,
 ) -> MaterializeResult:
     """Create or update one agent's profile. Idempotent.
@@ -341,8 +405,8 @@ def materialize(
     created = not profile_dir.exists()
     # The policy is part of what an agent IS, so it belongs in the identity that decides
     # whether a re-apply is a change. A policy edit with an unchanged spec must rewrite.
-    digest = _combined_digest(spec, policy)
-    writes = plan_writes(spec, paths, identity, policy)
+    digest = _combined_digest(spec, policy, knowledge)
+    writes = plan_writes(spec, paths, identity, policy, knowledge)
 
     if existing is not None and existing.digest == digest and not created:
         # Still verify the files are actually present: a deleted SOUL.md with a stale
@@ -386,6 +450,10 @@ def materialize(
     )
 
 
-def _combined_digest(spec: AgentSpec, policy: Optional[CompiledPolicy]) -> str:
+def _combined_digest(
+    spec: AgentSpec,
+    policy: Optional[CompiledPolicy],
+    knowledge: Optional[dict[str, Any]] = None,
+) -> str:
     """Delegates to the one shared definition; see :func:`nova.policy.agent_digest`."""
-    return agent_digest(spec, policy)
+    return agent_digest(spec, policy, knowledge)

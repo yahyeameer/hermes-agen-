@@ -104,18 +104,68 @@ def test_agents_reports_unmaterialized(api):
 
 def test_agents_reports_in_sync_after_apply(api, bundle, runtime, audit):
     from nova.apply import apply_bundle
-
-    from nova.policy import agent_digest, compile_policy
+    from nova.policy import compile_policy
 
     apply_bundle(bundle, runtime, audit=audit)
     rows = {a["id"]: a for a in api.handle("/platform/v1/agents").body["agents"]}
     assert rows["customer-support"]["in_sync"] is True
 
-    # The digest covers the agent AND the policy compiled for it, so a policy edit alone
-    # shows as drift.
+    # What the runtime wrote is what the runtime says it would write. Asked through
+    # expected_digest rather than recomputed here: a test with its own copy of the digest
+    # definition passes while the two real definitions drift apart, which is the bug this
+    # assertion is supposed to catch.
     spec = bundle.agent("customer-support")
-    expected = agent_digest(spec, compile_policy(spec, bundle.policy))
+    expected = runtime.expected_digest(
+        spec, policy=compile_policy(spec, bundle.policy), knowledge=bundle.knowledge
+    )
     assert rows["customer-support"]["applied_digest"] == expected
+
+
+def test_a_policy_edit_alone_shows_as_drift(api, bundle, runtime, audit):
+    """The digest covers the compiled policy, not only the agent spec."""
+    from dataclasses import replace
+
+    from nova.apply import apply_bundle
+    from nova.policy import compile_policy
+
+    apply_bundle(bundle, runtime, audit=audit)
+    spec = bundle.agent("customer-support")
+    applied = {a["id"]: a for a in api.handle("/platform/v1/agents").body["agents"]}
+
+    # The example bundle denies unlisted tools; loosening that is the edit.
+    assert bundle.policy.unlisted_tool == "deny"
+    looser = replace(bundle.policy, unlisted_tool="allow")
+    assert runtime.expected_digest(
+        spec, policy=compile_policy(spec, looser), knowledge=bundle.knowledge
+    ) != applied["customer-support"]["applied_digest"]
+
+
+def test_a_corpus_title_change_alone_shows_as_drift(api, bundle, runtime, audit):
+    """Corpus titles reach the model through the tool description, so they are identity.
+
+    The agent spec is untouched here — only the tenant's description of the corpus changed.
+    If that did not move the digest, the next apply would report the agent up to date while
+    its knowledge tool still named the corpus by its old title.
+    """
+    from dataclasses import replace
+
+    from nova.apply import apply_bundle
+    from nova.knowledge.sources import KnowledgeCatalog
+    from nova.policy import compile_policy
+
+    apply_bundle(bundle, runtime, audit=audit)
+    spec = bundle.agent("customer-support")
+    applied = {a["id"]: a for a in api.handle("/platform/v1/agents").body["agents"]}
+
+    renamed = KnowledgeCatalog(
+        sources=tuple(
+            replace(source, title=f"{source.title} (2026 revision)")
+            for source in bundle.knowledge.sources
+        )
+    )
+    assert runtime.expected_digest(
+        spec, policy=compile_policy(spec, bundle.policy), knowledge=renamed
+    ) != applied["customer-support"]["applied_digest"]
 
 
 def test_agents_detects_drift(api, bundle, runtime, audit, home):
@@ -314,3 +364,55 @@ def test_decisions_route_filters_by_agent(bundle, runtime, audit):
 def test_decisions_limit_is_validated(api):
     assert api.handle("/platform/v1/decisions", {"limit": "abc"}).status == 400
     assert api.handle("/platform/v1/decisions", {"limit": "0"}).status == 400
+
+
+# -- knowledge ---------------------------------------------------------------
+
+
+def test_knowledge_lists_declared_corpora_and_who_can_read_them(api, bundle):
+    body = api.handle("/platform/v1/knowledge").body
+    assert body["retrieval_enabled"] is True
+    handbook = next(s for s in body["sources"] if s["id"] == "company-handbook")
+    assert handbook["title"] == "Company Handbook"
+    assert handbook["readable_by"] == ["customer-support"]
+    # The agent with no grant appears with an empty list rather than being omitted: an
+    # operator asking "which agents can read anything" needs to see the ones that cannot.
+    rows = {row["id"]: row for row in body["agents"]}
+    assert rows["operations"]["sources"] == []
+
+
+def test_knowledge_says_plainly_when_nothing_is_indexed_yet(api):
+    """A fresh deployment has declarations and no index. That is normal, not an error."""
+    body = api.handle("/platform/v1/knowledge").body
+    assert body["index_detail"] == "no index yet — run `nova knowledge ingest`"
+    assert all(source["indexed"] is False for source in body["sources"])
+
+
+def test_knowledge_reports_index_counts_once_ingested(api, bundle, runtime):
+    from nova.knowledge import ingest
+
+    ingest(bundle.knowledge, runtime.knowledge_index_path, extractor=runtime)
+    body = api.handle("/platform/v1/knowledge").body
+    handbook = next(s for s in body["sources"] if s["id"] == "company-handbook")
+    assert handbook["indexed"] is True
+    assert handbook["documents"] == 2
+    assert handbook["chunks"] >= 2
+    assert not body["index_detail"]
+
+
+def test_a_corpus_left_in_the_index_after_being_undeclared_is_surfaced(api, bundle, runtime):
+    """It stays searchable by any agent whose grant was not re-applied — a live disclosure
+    path, so the control plane names it rather than filtering it out."""
+    from nova.knowledge import KnowledgeIndex, ingest
+    from nova.knowledge.chunk import chunk_document
+    from nova.knowledge.index import DocumentRecord
+
+    ingest(bundle.knowledge, runtime.knowledge_index_path, extractor=runtime)
+    with KnowledgeIndex.open(runtime.knowledge_index_path) as index:
+        index.replace_document(
+            DocumentRecord(source_id="retired-wiki", doc_path="old.md", digest="d"),
+            chunk_document("# Old\n\nSomething we stopped declaring.\n",
+                           source_id="retired-wiki", doc_path="old.md"),
+        )
+
+    assert api.handle("/platform/v1/knowledge").body["undeclared_in_index"] == ["retired-wiki"]

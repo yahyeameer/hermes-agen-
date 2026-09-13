@@ -51,9 +51,49 @@ def test_disabled_agents_are_skipped_not_materialized(tmp_path, runtime, audit, 
     assert not HermesPaths(home=home).profile_dir("operations").exists()
 
 
-def test_knowledge_declaration_warns_until_the_runtime_can_serve_it(bundle, runtime, audit):
+def test_a_servable_knowledge_declaration_produces_no_warning(bundle, runtime, audit, home):
+    """The runtime can retrieve now, so declaring a corpus is ordinary configuration."""
     report = apply_bundle(bundle, runtime, audit=audit)
-    assert any("knowledge sources are declared" in w for w in report.warnings)
+    assert not any("knowledge sources are declared" in w for w in report.warnings)
+    assert HermesPaths(home=home).knowledge_config_path("customer-support").is_file()
+
+
+def test_knowledge_declared_against_a_runtime_that_cannot_retrieve_warns(
+    bundle, runtime, audit, monkeypatch
+):
+    """The warning must still exist for the runtime that eventually cannot serve it.
+
+    Deleting it along with the Phase 1 limitation would leave a future adapter accepting a
+    knowledge declaration and silently never serving it.
+    """
+    from dataclasses import replace
+
+    from nova.runtime.base import RuntimeCapabilities
+
+    degraded = replace(runtime.capabilities, knowledge_retrieval=False)
+    monkeypatch.setattr(
+        type(runtime), "capabilities", property(lambda self: degraded), raising=False
+    )
+    assert isinstance(degraded, RuntimeCapabilities)
+
+    report = apply_bundle(bundle, runtime, audit=audit)
+    assert any("cannot retrieve them yet" in w for w in report.warnings)
+
+
+def test_a_grant_with_no_declared_corpora_warns(bundle, runtime, audit):
+    """An agent granted corpora from a catalog that declares none gets no tool at all.
+
+    Built by hand rather than loaded, because ``load_bundle`` rejects this combination
+    outright — which is the right place to catch a typo. The warning still earns its keep
+    for a bundle assembled in code, and a warning that can never fire is worse than none.
+    """
+    from dataclasses import replace
+
+    from nova.knowledge.sources import KnowledgeCatalog
+
+    empty = replace(bundle, knowledge=KnowledgeCatalog())
+    report = apply_bundle(empty, runtime, audit=audit)
+    assert any("no knowledge tool will be installed" in w for w in report.warnings)
 
 
 def test_orphaned_agent_warns_but_is_never_deleted(tmp_path, runtime, audit, home):

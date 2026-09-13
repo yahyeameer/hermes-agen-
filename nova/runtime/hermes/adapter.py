@@ -10,17 +10,20 @@ import yaml
 
 from nova.audit import AuditLog
 from nova.errors import RuntimeAdapterError
+from nova.knowledge.sources import KnowledgeCatalog
 from nova.runtime.hermes.skin import build_skin, skin_filename
 from nova.runtime.base import (
     AgentRuntime,
     MaterializedAgent,
     MaterializeResult,
     RuntimeCapabilities,
+    ExtractedDocument,
     RuntimeHealth,
     TaskView,
     UsageSummary,
 )
 from nova.runtime.hermes import materialize as _materialize
+from nova.runtime.hermes import extract as _extract
 from nova.runtime.hermes import usage as _usage
 from nova.runtime.hermes.limits import LIMIT_FACTS
 from nova.runtime.hermes import work as _work
@@ -34,8 +37,13 @@ from nova.spec import AgentSpec, IdentitySpec
 #: deny list and are genuinely enforced ahead of any bypass. Positive scoping
 #: (toolsets/allow) is not yet compiled — see ``materialize.warnings_for`` for why — and
 #: the materializer warns whenever a spec declares it.
-#: ``knowledge_retrieval`` is False because no runtime has it yet; the spec field is
-#: carried through, never silently dropped.
+#: ``knowledge_retrieval`` is True: a granted agent gets a ``knowledge_search`` tool
+#: installed as a per-agent plugin, scoped in SQL to the corpora its tenant granted it.
+#: Plugin toolsets are enabled by default (``hermes_cli/tools_config.py``), so the tool
+#: reaches the model without NOVA writing ``platform_toolsets`` — the key it deliberately
+#: does not touch.
+#: ``document_extraction`` is True because the runtime ships extractors for PDF, Office and
+#: OpenDocument formats, which NOVA borrows rather than reimplements (see ``extract.py``).
 #: ``policy_enforcement`` is True: policy compiles to a plugin on the runtime's documented
 #: pre-tool-call hook, which vetoes a call or escalates it to the same human gate that
 #: guards dangerous shell commands — and that gate fails closed with no human present.
@@ -45,7 +53,8 @@ HERMES_CAPABILITIES = RuntimeCapabilities(
     process_isolation=True,
     credential_isolation=True,
     tool_scoping=True,
-    knowledge_retrieval=False,
+    knowledge_retrieval=True,
+    document_extraction=True,
     policy_enforcement=True,
     brand_projection=True,
 )
@@ -92,14 +101,23 @@ class HermesRuntime(AgentRuntime):
         correlation_id: str,
         identity: Optional[IdentitySpec] = None,
         policy: Optional[CompiledPolicy] = None,
+        knowledge: Optional[KnowledgeCatalog] = None,
         dry_run: bool = False,
     ) -> MaterializeResult:
+        grant = _materialize.build_knowledge_config(
+            spec,
+            self.paths,
+            knowledge,
+            tenant_id=audit.tenant_id,
+            audit_log=audit.path,
+        )
         if dry_run:
             # A dry run changes nothing, so it is not a model-visible change. It is
             # still recorded: knowing what an operator previewed is useful during an
             # incident, and a plain record() carries no intent/commit pair.
             result = _materialize.materialize(
-                spec, self.paths, identity=identity, policy=policy, dry_run=True
+                spec, self.paths, identity=identity, policy=policy, knowledge=grant,
+                dry_run=True,
             )
             audit.record(
                 "agent.materialize_preview",
@@ -114,18 +132,41 @@ class HermesRuntime(AgentRuntime):
             "agent.materialized",
             correlation_id=correlation_id,
             subject=spec.id,
-            digest=_materialize._combined_digest(spec, policy),
+            digest=_materialize._combined_digest(spec, policy, grant),
             detail={
                 "runtime": self.name,
                 "agent_name": spec.name,
                 "policy": bool(policy),
+                "knowledge_sources": [
+                    entry["id"] for entry in (grant or {}).get("sources", [])
+                ],
             },
         ) as outcome:
             result = _materialize.materialize(
-                spec, self.paths, identity=identity, policy=policy, dry_run=False
+                spec, self.paths, identity=identity, policy=policy, knowledge=grant,
+                dry_run=False,
             )
             outcome.update(result.to_detail())
         return result
+
+    @property
+    def knowledge_index_path(self) -> Path:
+        return self.paths.knowledge_index
+
+    def expected_digest(
+        self,
+        spec: AgentSpec,
+        *,
+        policy: Optional[CompiledPolicy] = None,
+        knowledge: Optional[KnowledgeCatalog] = None,
+    ) -> str:
+        """As the contract, plus this agent's resolved knowledge grant.
+
+        The grant is resolved rather than taken from the spec because the corpus titles the
+        tool description carries come from the tenant catalog, not from the agent.
+        """
+        grant = _materialize.build_knowledge_config(spec, self.paths, knowledge)
+        return _materialize._combined_digest(spec, policy, grant)
 
     def list_agents(self) -> list[MaterializedAgent]:
         profiles_dir = self.paths.profiles_dir
@@ -227,6 +268,10 @@ class HermesRuntime(AgentRuntime):
             work_store_present=present,
             agent_count=len(self.list_agents()),
         )
+
+    def extract_text(self, path: Path) -> ExtractedDocument:
+        """Delegates to the runtime's extractor; see :mod:`nova.runtime.hermes.extract`."""
+        return _extract.extract(path)
 
     def usage(self, agent_id: str) -> UsageSummary:
         """Reported usage for one agent. Observation only — see the returned caveats."""

@@ -102,6 +102,11 @@ def apply_bundle(
             f"knowledge sources are declared by {', '.join(knowledge_users)} but runtime "
             f"{runtime.name!r} cannot retrieve them yet; the declaration is recorded and inert"
         )
+    if knowledge_users and not bundle.knowledge.sources:
+        warnings.append(
+            f"{', '.join(knowledge_users)} name knowledge sources but the bundle declares no "
+            "corpora — no knowledge tool will be installed"
+        )
 
     audit.record(
         "bundle.apply_started",
@@ -113,6 +118,7 @@ def apply_bundle(
             "dry_run": dry_run,
             "agents": [spec.id for spec in bundle.agents],
             "policy_declared": bundle.policy is not None,
+            "knowledge_sources": [source.id for source in bundle.knowledge.sources],
             "warnings": warnings,
         },
     )
@@ -142,6 +148,7 @@ def apply_bundle(
                 correlation_id=correlation_id,
                 identity=bundle.identity,
                 policy=compiled,
+                knowledge=bundle.knowledge,
                 dry_run=dry_run,
             )
         )

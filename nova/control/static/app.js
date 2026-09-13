@@ -34,6 +34,12 @@ function pill(label, tone) {
   return el("span", tone ? `pill ${tone}` : "pill", label);
 }
 
+/* "1 docs" reads as a bug in the page even when the number is right, and a reader who
+   doubts the rendering doubts the number. */
+function plural(count, singular, plural_) {
+  return `${count} ${count === 1 ? singular : plural_ || `${singular}s`}`;
+}
+
 /* State -> tone. Only states that need a human get a status colour; the rest stay
    neutral ink, so colour marks attention rather than decorating every row. */
 const STATE_TONE = { done: "good", review: "warn", blocked: "crit" };
@@ -208,6 +214,86 @@ const ENFORCEMENT_LABEL = {
   observed_only: "observed",
 };
 const ENFORCEMENT_TONE = { hard_preemptive: "good", hard_boundary: "good" };
+
+/* Classification is the customer's own label for how sensitive a corpus is. Only the two
+   that mean "be careful who reads this" carry colour; public and internal stay neutral ink,
+   so the eye lands on the corpus that would matter in a disclosure. */
+const CLASSIFICATION_TONE = { confidential: "warn", restricted: "crit" };
+
+function renderKnowledge(knowledge) {
+  const target = document.getElementById("knowledge");
+  const count = document.getElementById("knowledge-count");
+  target.replaceChildren();
+
+  const sources = knowledge.sources || [];
+  count.textContent = sources.length
+    ? plural(sources.length, "corpus", "corpora")
+    : "none declared";
+
+  if (!knowledge.retrieval_enabled) {
+    target.appendChild(
+      emptyState(
+        "Retrieval is not available on this runtime",
+        "Declared sources are recorded but no agent can search them."
+      )
+    );
+    return;
+  }
+
+  if (!sources.length) {
+    target.appendChild(
+      emptyState(
+        "No knowledge corpora declared",
+        "Add a knowledge.yaml to the tenant bundle, then run `nova knowledge ingest`."
+      )
+    );
+    return;
+  }
+
+  if (knowledge.index_detail) showBanner(`Knowledge: ${knowledge.index_detail}`, "neutral");
+
+  const rows = sources.map((source) => {
+    const what = el("td");
+    what.appendChild(el("div", "name", source.title || source.id));
+    if (source.description) what.appendChild(el("div", "sub", source.description));
+
+    const classification = el("td");
+    classification.appendChild(
+      pill(source.classification, CLASSIFICATION_TONE[source.classification] || null)
+    );
+
+    /* Who can read a corpus is the fact a reviewer came here for, so it is a column of its
+       own rather than something to infer from the agents table. "nobody" is stated
+       explicitly: a corpus that is indexed and unread is a cost with no benefit, and it
+       should look different from one that simply has few readers. */
+    const readers = source.readable_by || [];
+    const who = el("td", "id", readers.length ? readers.join(", ") : "nobody");
+
+    const state = el("td");
+    if (source.indexed) {
+      state.appendChild(el("div", "name", plural(source.documents, "doc")));
+      state.appendChild(el("div", "sub", plural(source.chunks, "chunk")));
+    } else {
+      state.appendChild(pill("not indexed", "warn"));
+    }
+
+    return [what, classification, who, state];
+  });
+
+  target.appendChild(table(["Corpus", "Classification", "Readable by", "Indexed"], rows));
+
+  /* A corpus still in the index that the bundle no longer declares is searchable by any
+     agent whose grant has not been re-applied. That is a live disclosure path, so it is
+     called out rather than left to be noticed. */
+  const stale = knowledge.undeclared_in_index || [];
+  if (stale.length) {
+    showBanner(
+      `Indexed but no longer declared: ${stale.join(", ")} — re-run \`nova knowledge ingest\` ` +
+        "to drop them, or they stay searchable by agents already granted them.",
+      "problem"
+    );
+  }
+}
 
 function renderControls(budget) {
   const target = document.getElementById("controls");
@@ -433,19 +519,21 @@ async function boot() {
   }
 
   try {
-    const [health, agents, tasks, policy, decisions, budget] = await Promise.all([
+    const [health, agents, tasks, policy, decisions, budget, knowledge] = await Promise.all([
       getJSON("/health"),
       getJSON("/agents"),
       getJSON("/tasks?limit=100"),
       getJSON("/policy"),
       getJSON("/decisions?limit=50"),
       getJSON("/budget"),
+      getJSON("/knowledge"),
     ]);
     renderHealth(health);
     renderStats(agents, tasks);
     renderAgents(agents);
     renderTasks(tasks);
     renderPolicy(policy);
+    renderKnowledge(knowledge);
     renderDecisions(decisions);
     renderControls(budget);
     renderUsage(budget);

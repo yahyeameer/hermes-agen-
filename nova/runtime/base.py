@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from nova.audit import AuditLog
-from nova.policy import CompiledPolicy
+from nova.policy import CompiledPolicy, agent_digest
+from nova.knowledge.sources import KnowledgeCatalog
 from nova.spec import AgentSpec, IdentitySpec
 
 
@@ -46,8 +47,13 @@ class RuntimeCapabilities:
     credential_isolation: bool = False
     #: Per-agent tool restriction is enforced by the runtime.
     tool_scoping: bool = False
-    #: The runtime can retrieve from a knowledge corpus. False everywhere in Phase 1.
+    #: An agent can search a declared corpus from inside a run. False means a declared
+    #: knowledge source is carried and recorded but never reaches a model.
     knowledge_retrieval: bool = False
+    #: The runtime can pull text out of formats beyond UTF-8 (PDF, Office, OpenDocument),
+    #: through :meth:`AgentRuntime.extract_text`. Ingestion still works without it — it
+    #: just skips what it cannot read, and says which files it skipped and why.
+    document_extraction: bool = False
     #: Per-agent tool policy is enforced inside the runtime, including escalation of
     #: business actions to a human. False means a declared policy would be inert.
     policy_enforcement: bool = False
@@ -220,6 +226,29 @@ class UsageSummary:
 
 
 @dataclass(frozen=True)
+class ExtractedDocument:
+    """One document's text, as pulled out of whatever format it arrived in."""
+
+    path: str
+    text: str
+    extracted: bool
+    #: How the text was obtained: ``native`` (plain text read by NOVA) or the adapter's
+    #: own extractor. Recorded so an operator can tell a real PDF extraction from a
+    #: fallback that read the bytes as text.
+    method: str = ""
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "path": self.path,
+            "extracted": self.extracted,
+            "method": self.method,
+            "detail": self.detail,
+            "characters": len(self.text),
+        }
+
+
+@dataclass(frozen=True)
 class MaterializedAgent:
     """An agent as it currently exists inside a runtime.
 
@@ -289,6 +318,7 @@ class AgentRuntime(ABC):
         correlation_id: str,
         identity: Optional[IdentitySpec] = None,
         policy: Optional[CompiledPolicy] = None,
+        knowledge: Optional[KnowledgeCatalog] = None,
         dry_run: bool = False,
     ) -> MaterializeResult:
         """Create or update one agent inside the runtime.
@@ -301,7 +331,34 @@ class AgentRuntime(ABC):
         ``policy`` is the agent's compiled policy, or None when the tenant declares none.
         An adapter that cannot enforce policy must say so through
         :attr:`RuntimeCapabilities.policy_enforcement` rather than accepting it silently.
+
+        ``knowledge`` is the tenant's whole declared catalog, not this agent's slice of it.
+        The adapter narrows it by ``spec.knowledge.sources`` and installs whatever retrieval
+        mechanism it has. Passing the catalog rather than a resolved grant keeps the caller
+        free of any assumption about how a corpus reaches an agent — a file beside a
+        profile here, something else entirely in the next adapter.
         """
+
+    def expected_digest(
+        self,
+        spec: AgentSpec,
+        *,
+        policy: Optional[CompiledPolicy] = None,
+        knowledge: Optional[KnowledgeCatalog] = None,
+    ) -> str:
+        """The digest :meth:`materialize_agent` would record for this spec, without writing.
+
+        The drift check and the materializer must agree on what an agent's identity *is*, and
+        only the adapter knows everything that goes into it — an adapter that compiles extra
+        runtime-specific state into an agent has to fold that state in here too. Two
+        definitions of this would disagree the moment one of them grew a field, and the
+        symptom is an agent that reports "out of sync" forever and re-materializes on every
+        apply.
+
+        The default covers the portable inputs; :func:`nova.policy.agent_digest` is the one
+        implementation underneath.
+        """
+        return agent_digest(spec, policy)
 
     @abstractmethod
     def list_agents(self) -> list[MaterializedAgent]:
@@ -349,6 +406,33 @@ class AgentRuntime(ABC):
     def health(self) -> RuntimeHealth:
         """Whether the runtime is present and readable."""
 
+    def extract_text(self, path: Path) -> ExtractedDocument:
+        """Pull readable text out of a document.
+
+        Document extraction is a *runtime capability*: a mature runtime already handles
+        PDF, Office and OpenDocument formats, and re-implementing that would be weeks of
+        work and a permanent liability. Adapters therefore expose theirs here rather than
+        the platform carrying its own.
+
+        The default reads UTF-8 text and nothing else, so a runtime that offers no
+        extractor still ingests plain text and markdown instead of failing.
+        """
+        try:
+            return ExtractedDocument(
+                path=str(path),
+                text=path.read_text(encoding="utf-8"),
+                extracted=True,
+                method="native",
+            )
+        except (OSError, UnicodeDecodeError) as exc:
+            return ExtractedDocument(
+                path=str(path),
+                text="",
+                extracted=False,
+                method="native",
+                detail=f"not readable as UTF-8 text and this runtime offers no extractor: {exc}",
+            )
+
     @abstractmethod
     def usage(self, agent_id: str) -> UsageSummary:
         """Reported model usage for one agent.
@@ -366,6 +450,17 @@ class AgentRuntime(ABC):
         Named in NOVA's terms because every runtime has one; what it contains and how it
         is laid out is the adapter's business and nobody else's.
         """
+
+    @property
+    def knowledge_index_path(self) -> Path:
+        """Where this runtime's deployment keeps the corpus index.
+
+        On the contract rather than computed by callers, for the same reason
+        :attr:`state_location` is: a CLI or a control plane that built this path itself
+        would be encoding one adapter's directory layout, and would quietly point at the
+        wrong file the first time an adapter laid its state out differently.
+        """
+        return self.state_location / "nova-knowledge.db"
 
     def limit_facts(self) -> tuple:
         """What each NOVA limit actually does on this runtime.

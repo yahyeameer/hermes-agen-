@@ -25,42 +25,141 @@ def nova_python_files() -> list[Path]:
     return [p for p in NOVA.rglob("*.py") if "__pycache__" not in p.parts]
 
 
+def _import_roots(node: ast.AST) -> set[str]:
+    if isinstance(node, ast.Import):
+        return {alias.name.split(".")[0] for alias in node.names}
+    if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+        return {node.module.split(".")[0]}
+    return set()
+
+
 def imported_modules(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     names: set[str] = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            names.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            names.add(node.module.split(".")[0])
+        names |= _import_roots(node)
     return names
 
 
-def test_platform_layer_never_imports_the_runtime():
-    """NOVA must load without the runtime installed. The adapter uses on-disk seams only."""
-    runtime_packages = {
-        "hermes_cli", "hermes_constants", "hermes_state", "hermes_logging",
-        "agent", "gateway", "tools", "toolsets", "cli", "run_agent", "model_tools",
-    }
+def module_level_imports(path: Path) -> set[str]:
+    """Imports that run at import time.
+
+    An import nested inside a function body runs only when that function is called, so it
+    does not decide whether the module loads. The distinction is the whole difference
+    between "NOVA requires the runtime" and "this one function requires the runtime".
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    names: set[str] = set()
+    stack: list[tuple[ast.AST, bool]] = [(tree, True)]
+    while stack:
+        node, at_module_level = stack.pop()
+        if at_module_level:
+            names |= _import_roots(node)
+        deferred = isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+        for child in ast.iter_child_nodes(node):
+            stack.append((child, at_module_level and not deferred))
+    return names
+
+
+def adapter_package(path: Path) -> str | None:
+    """``nova/runtime/<adapter>/`` for a file inside one, else ``None``."""
+    parts = path.relative_to(NOVA).parts
+    if len(parts) >= 3 and parts[0] == "runtime":
+        return parts[1]
+    return None
+
+
+#: Top-level modules that only exist when the runtime is installed.
+RUNTIME_PACKAGES = {
+    "hermes_cli", "hermes_constants", "hermes_state", "hermes_logging",
+    "agent", "gateway", "tools", "toolsets", "cli", "run_agent", "model_tools",
+}
+
+
+def test_platform_layer_never_imports_the_runtime_at_module_level():
+    """NOVA must load and test with only the stdlib and PyYAML present.
+
+    A module-level runtime import breaks that for the whole package, so it is forbidden
+    everywhere — including inside an adapter, which must stay importable so the registry
+    can list it on a machine where its runtime is absent.
+    """
     offenders: list[str] = []
     for path in nova_python_files():
-        leaked = imported_modules(path) & runtime_packages
+        leaked = module_level_imports(path) & RUNTIME_PACKAGES
         if leaked:
             offenders.append(f"{path.relative_to(ROOT)}: imports {', '.join(sorted(leaked))}")
-    assert not offenders, "platform code imported the runtime:\n" + "\n".join(offenders)
+    assert not offenders, "platform code imported the runtime at module level:\n" + "\n".join(
+        offenders
+    )
+
+
+def test_only_an_adapter_may_import_the_runtime_lazily():
+    """A deferred runtime import is a capability the adapter borrows, not a dependency.
+
+    Some things only the runtime can do — pulling text out of a PDF, for one. Reimplementing
+    them in NOVA would be worse than calling them, but the call must be confined: inside
+    ``nova/runtime/<adapter>/``, in a function body, where the runtime is by definition
+    installed because the adapter was selected.
+    """
+    offenders: list[str] = []
+    for path in nova_python_files():
+        lazy = (imported_modules(path) - module_level_imports(path)) & RUNTIME_PACKAGES
+        if lazy and adapter_package(path) is None:
+            offenders.append(
+                f"{path.relative_to(ROOT)}: lazily imports {', '.join(sorted(lazy))} "
+                f"outside an adapter package"
+            )
+    assert not offenders, "\n".join(offenders)
+
+
+def test_the_adapter_packages_still_import_without_their_runtime():
+    """The proof that the lazy import stays lazy. Costs one subprocess, catches a real bug."""
+    probe = (
+        "import importlib, sys; "
+        "sys.modules.update({name: None for name in "
+        f"{sorted(RUNTIME_PACKAGES)!r}"
+        "}); "
+        "importlib.import_module('nova.runtime.hermes.adapter')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", probe], capture_output=True, text=True, cwd=ROOT
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_platform_layer_depends_only_on_stdlib_and_yaml():
-    """Keeping the dependency surface at zero is what makes the layer portable."""
+    """Keeping the install-time dependency surface at zero is what makes the layer portable.
+
+    Scoped to module-level imports for the same reason as the test above: a lazy import
+    inside an adapter is not something ``pip install nova`` has to satisfy. The two tests
+    that follow it police where those lazy imports may live.
+    """
     allowed_third_party = {"yaml"}
     stdlib = set(sys.stdlib_module_names)
     offenders: list[str] = []
     for path in nova_python_files():
-        for name in imported_modules(path):
+        for name in module_level_imports(path):
             if name in stdlib or name in allowed_third_party or name == "nova":
                 continue
             offenders.append(f"{path.relative_to(ROOT)}: imports {name}")
     assert not offenders, "unexpected dependency:\n" + "\n".join(offenders)
+
+
+def test_lazy_imports_outside_the_stdlib_are_confined_to_adapters():
+    """Otherwise the rule above would be trivially escapable by indenting an import."""
+    allowed_third_party = {"yaml"}
+    stdlib = set(sys.stdlib_module_names)
+    offenders: list[str] = []
+    for path in nova_python_files():
+        if adapter_package(path) is not None:
+            continue
+        for name in imported_modules(path) - module_level_imports(path):
+            if name in stdlib or name in allowed_third_party or name == "nova":
+                continue
+            offenders.append(f"{path.relative_to(ROOT)}: lazily imports {name}")
+    assert not offenders, "unexpected deferred dependency outside an adapter:\n" + "\n".join(
+        offenders
+    )
 
 
 def test_runtime_contract_is_free_of_runtime_vocabulary():

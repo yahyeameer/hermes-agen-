@@ -16,6 +16,7 @@ the authoritative boundary definition.
 | `docs/platform/PHASE_1.md` | What Phase 1 built, its known limitations, and its extension points |
 | `docs/platform/PHASE_2.md` | Policy and governance: how enforcement works, and what it cannot yet express |
 | `docs/platform/PHASE_3.md` | Budget controls: what is enforced, what is only observed, and why |
+| `docs/platform/PHASE_4.md` | Knowledge: declared corpora, scoped retrieval, and the trust boundary around it |
 | `docs/platform/BUDGET_ENFORCEMENT_AUDIT.md` | What the runtime exposes for usage and limits, and which of it is enforceable |
 | `docs/platform/KNOWLEDGE_CAPABILITY_AUDIT.md` | What exists for knowledge, retrieval and documents; what to reuse versus build |
 | `docs/platform/CORE_PATCHES.md` | The patch budget — every upstream file touched, and why |
@@ -24,7 +25,7 @@ the authoritative boundary definition.
 
 ## Layout
 
-Directories appear as their phase lands. Phase 1 built the first five.
+Directories appear as their phase lands.
 
 ```
 spec/           AgentSpec, IdentitySpec, OrganizationSpec, TenantBundle    [built]
@@ -32,12 +33,12 @@ runtime/        AgentRuntime contract, registry, and the Hermes adapter    [buil
 audit/          Append-only log enforcing "model-visible means logged"     [built]
 policy/         Declaration, compilation, decisions and limit vocabulary   [built]
 control/        Control API (read-only) + the dashboard                    [built]
+knowledge/      Declare -> chunk -> index -> search, scoped per agent       [built]
 apply.py        Bundle -> runtime orchestration                            [built]
-cli.py          `python -m nova validate | plan | apply | status | serve`  [built]
-examples/       A complete two-agent tenant bundle                         [built]
+cli.py          `validate | plan | apply | status | knowledge | serve`     [built]
+examples/       A two-agent tenant bundle with two corpora                 [built]
 
 supervisor/     Decompose -> route -> task board -> collect                [planned]
-knowledge/      Ingest -> extract -> chunk -> index -> retrieve            [planned]
 observability/  JSON logs, correlation IDs, CloudWatch                     [planned]
 ```
 
@@ -51,6 +52,10 @@ python -m nova validate nova/examples/acme
 python -m nova plan     nova/examples/acme
 python -m nova apply    nova/examples/acme
 python -m nova status
+
+python -m nova knowledge ingest nova/examples/acme
+python -m nova knowledge search nova/examples/acme "refund approval" --as-agent customer-support
+
 python -m nova serve nova/examples/acme   # dashboard on 127.0.0.1:8787
 ```
 

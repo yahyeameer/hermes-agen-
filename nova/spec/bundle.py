@@ -6,6 +6,7 @@ Layout::
       organization.yaml     required — who this deployment serves
       identity.yaml         optional — white-label surface; defaults apply when absent
       policy.yaml           optional — business actions, permissions, enforcement defaults
+      knowledge.yaml        optional — the corpora agents may be granted
       agents/*.yaml         one AgentSpec per file
       prompts/*.md          persona files referenced by agents
 
@@ -18,13 +19,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
 import yaml
 
 from nova.errors import SpecError
+from nova.knowledge.sources import KnowledgeCatalog, load_catalog
 from nova.spec.agent import AgentSpec
 from nova.spec.identity import IdentitySpec
 from nova.policy.model import PolicySpec
@@ -33,6 +35,7 @@ from nova.spec.organization import OrganizationSpec
 ORGANIZATION_FILE = "organization.yaml"
 IDENTITY_FILE = "identity.yaml"
 POLICY_FILE = "policy.yaml"
+KNOWLEDGE_FILE = "knowledge.yaml"
 AGENTS_DIR = "agents"
 
 
@@ -59,6 +62,9 @@ class TenantBundle:
     #: one: no policy means no enforcement plugin is installed and agents behave exactly
     #: as they did before governance existed.
     policy: Optional[PolicySpec] = None
+    #: Declared corpora. An empty catalog means no agent gets a knowledge tool — the same
+    #: "absent is a valid state" rule the policy follows.
+    knowledge: KnowledgeCatalog = field(default_factory=KnowledgeCatalog)
 
     @property
     def tenant_id(self) -> str:
@@ -81,6 +87,7 @@ class TenantBundle:
                 "organization": self.organization.to_dict(),
                 "identity": self.identity.to_dict(),
                 "policy": self.policy.to_dict() if self.policy else None,
+                "knowledge": self.knowledge.to_dict(),
                 "agents": [spec.to_dict() for spec in sorted(self.agents, key=lambda s: s.id)],
             },
             sort_keys=True,
@@ -95,6 +102,7 @@ class TenantBundle:
             "organization": self.organization.to_dict(),
             "identity": self.identity.to_dict(),
             "policy": self.policy.to_dict() if self.policy else None,
+            "knowledge": self.knowledge.to_dict(),
             "agents": [spec.to_dict() for spec in self.agents],
         }
 
@@ -127,8 +135,11 @@ def load_bundle(root: Path | str, *, env: Optional[Mapping[str, str]] = None) ->
         else None
     )
 
+    knowledge = load_catalog(root, env=env)
+
     agents = _load_agents(root, env=env)
     _check_cross_references(agents, identity)
+    _check_knowledge_references(agents, knowledge)
     if policy is not None:
         _check_policy_references(agents, policy)
 
@@ -138,7 +149,30 @@ def load_bundle(root: Path | str, *, env: Optional[Mapping[str, str]] = None) ->
         identity=identity,
         agents=agents,
         policy=policy,
+        knowledge=knowledge,
     )
+
+
+def _check_knowledge_references(
+    agents: tuple[AgentSpec, ...], knowledge: KnowledgeCatalog
+) -> None:
+    """Fail on an agent granted a corpus the tenant never declared.
+
+    Failing here rather than at materialization is the point. A typo in a source id would
+    otherwise produce an agent whose knowledge tool searches one corpus instead of two, with
+    nothing anywhere saying so — it would simply answer worse, and look like a retrieval
+    quality problem for as long as it took someone to re-read the YAML.
+    """
+    for spec in agents:
+        unknown = [name for name in spec.knowledge.sources if name not in knowledge.ids]
+        if unknown:
+            raise SpecError(
+                f"names knowledge source(s) the tenant has not declared: "
+                f"{', '.join(sorted(unknown))}; declared in "
+                f"{KNOWLEDGE_FILE}: {', '.join(sorted(knowledge.ids)) or '(none)'}",
+                field="knowledge.sources",
+                source=spec.source,
+            )
 
 
 def _load_agents(root: Path, *, env: Optional[Mapping[str, str]]) -> tuple[AgentSpec, ...]:

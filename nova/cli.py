@@ -57,6 +57,48 @@ def _build_parser() -> argparse.ArgumentParser:
     status = sub.add_parser("status", help="report what the runtime currently holds")
     status.add_argument("--json", action="store_true")
 
+    knowledge = sub.add_parser("knowledge", help="manage the tenant's knowledge corpora")
+    knowledge_sub = knowledge.add_subparsers(dest="knowledge_command", required=True)
+
+    ingest_cmd = knowledge_sub.add_parser("ingest", help="index declared sources")
+    ingest_cmd.add_argument("bundle", type=Path)
+    ingest_cmd.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        dest="sources",
+        metavar="ID",
+        help="only this source (repeatable); default: every declared source",
+    )
+    ingest_cmd.add_argument(
+        "--force",
+        action="store_true",
+        help="re-chunk every document, including those whose content is unchanged",
+    )
+    ingest_cmd.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="walk, extract and chunk without writing the index",
+    )
+
+    knowledge_status = knowledge_sub.add_parser("status", help="what the index currently holds")
+    knowledge_status.add_argument("bundle", type=Path)
+    knowledge_status.add_argument("--json", action="store_true")
+
+    knowledge_search = knowledge_sub.add_parser(
+        "search", help="run a search exactly as an agent would"
+    )
+    knowledge_search.add_argument("bundle", type=Path)
+    knowledge_search.add_argument("query")
+    knowledge_search.add_argument(
+        "--as-agent",
+        default="",
+        metavar="ID",
+        help="scope to this agent's granted corpora — the check that matters before a rollout",
+    )
+    knowledge_search.add_argument("--source", action="append", default=[], dest="sources")
+    knowledge_search.add_argument("--limit", type=int, default=5)
+
     serve_cmd = sub.add_parser("serve", help="run the read-only Control API and dashboard")
     serve_cmd.add_argument("bundle", type=Path)
     serve_cmd.add_argument("--host", default="127.0.0.1", help="default: loopback only")
@@ -81,6 +123,101 @@ def _report(report, *, verb: str) -> None:
         print(f"  warning:  {warning}")
     if report.dry_run:
         print(f"\nNothing was written. Re-run `nova {verb}` without --dry-run to apply.")
+
+
+def _knowledge(args) -> int:
+    """``nova knowledge ...`` — ingest, inspect and rehearse retrieval."""
+    from nova.knowledge import KnowledgeIndex, ingest
+
+    bundle = load_bundle(args.bundle)
+    runtime = get_runtime(args.runtime, home=args.home, tenant_id=bundle.tenant_id)
+    index_path = runtime.knowledge_index_path
+
+    if args.knowledge_command == "ingest":
+        if not bundle.knowledge.sources:
+            print(f"{bundle.tenant_id}: no knowledge sources declared (knowledge.yaml is absent)")
+            return 0
+        audit = (
+            NullAuditLog(tenant_id=bundle.tenant_id)
+            if args.dry_run
+            else AuditLog.for_home(
+                runtime.state_location, tenant_id=bundle.tenant_id, actor="nova-cli"
+            )
+        )
+        report = ingest(
+            bundle.knowledge,
+            index_path,
+            extractor=runtime,
+            source_ids=args.sources or None,
+            audit=audit,
+            force=args.force,
+            dry_run=args.dry_run,
+        )
+        print(report.summary())
+        for source in report.sources:
+            for path, reason in source.skipped:
+                print(f"  skipped  {source.source_id}/{path}: {reason}")
+            for path in source.removed:
+                print(f"  removed  {source.source_id}/{path} (no longer on disk)")
+        if args.dry_run:
+            print("\nNothing was written. Re-run without --dry-run to index.")
+        else:
+            print(f"\nindex: {index_path}")
+        return 0
+
+    if not index_path.is_file():
+        print(
+            f"no knowledge index at {index_path}. Run `nova knowledge ingest "
+            f"{args.bundle}` first.",
+            file=sys.stderr,
+        )
+        return 1
+
+    with KnowledgeIndex.open(index_path, create=False) as index:
+        if args.knowledge_command == "status":
+            stats = index.stats()
+            if args.json:
+                print(json.dumps({"index": str(index_path), "sources": stats}, indent=2))
+                return 0
+            print(f"index: {index_path}")
+            declared = {source.id for source in bundle.knowledge.sources}
+            for source_id in sorted(set(stats) | declared):
+                row = stats.get(source_id)
+                if row is None:
+                    print(f"  {source_id:22} declared, never ingested")
+                    continue
+                extra = "" if source_id in declared else "   (no longer declared)"
+                print(
+                    f"  {source_id:22} {row['documents']:5} docs  {row['chunks']:6} chunks  "
+                    f"{row['bytes'] / 1024:8.1f} KiB{extra}"
+                )
+            return 0
+
+        # search
+        scope = list(args.sources)
+        if args.as_agent:
+            spec = bundle.agent(args.as_agent)
+            granted = list(spec.knowledge.sources)
+            # Intersect rather than union: --as-agent is a rehearsal of that agent's real
+            # scope, so it must never be able to reach past it.
+            scope = [s for s in scope if s in granted] if scope else granted
+            if not scope:
+                print(f"{args.as_agent} is granted no knowledge sources; nothing to search.")
+                return 0
+        elif not scope:
+            scope = [source.id for source in bundle.knowledge.sources]
+
+        hits = index.search(args.query, source_ids=scope, limit=args.limit)
+        print(f"searching {', '.join(scope)} for {args.query!r}")
+        if not hits:
+            print("no passages matched")
+            return 0
+        for position, hit in enumerate(hits, start=1):
+            print(f"\n[{position}] {hit.doc_title or hit.doc_path} — {hit.citation}")
+            print(f"    score {hit.score:.4g}   source {hit.source_id}")
+            for line in hit.snippet.splitlines():
+                print(f"    {line}")
+    return 0
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -129,6 +266,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 owner = "nova" if agent.managed_by_nova else "not nova-managed"
                 print(f"  {agent.agent_id:22} {owner}")
             return 0
+
+        if args.command == "knowledge":
+            return _knowledge(args)
 
         if args.command == "serve":
             from nova.control import ControlAPI, serve

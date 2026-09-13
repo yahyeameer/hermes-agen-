@@ -21,7 +21,7 @@ from nova.runtime.hermes.paths import HermesPaths
 
 def load_installed_plugin(home: Path, agent_id: str, name: str):
     """Import the plugin from the profile, the way plugin discovery would."""
-    plugin_dir = HermesPaths(home=home).plugin_dir(agent_id)
+    plugin_dir = HermesPaths(home=home).policy_plugin_dir(agent_id)
     spec = importlib.util.spec_from_file_location(
         name, plugin_dir / "__init__.py", submodule_search_locations=[str(plugin_dir)]
     )
@@ -45,7 +45,7 @@ def applied(bundle, runtime, audit, home):
 
 def test_plugin_is_installed_into_each_agent(applied):
     for agent_id in ("customer-support", "operations"):
-        plugin_dir = HermesPaths(home=applied).plugin_dir(agent_id)
+        plugin_dir = HermesPaths(home=applied).policy_plugin_dir(agent_id)
         assert (plugin_dir / "__init__.py").is_file()
         assert (plugin_dir / "_decide.py").is_file()
         assert (plugin_dir / "plugin.yaml").is_file()
@@ -55,14 +55,14 @@ def test_plugin_is_installed_into_each_agent(applied):
 def test_plugin_is_installed_where_discovery_will_find_it(applied):
     """Workers run with their profile as the runtime home, and discovery scans
     <home>/plugins — so the plugin must sit exactly there."""
-    plugin_dir = HermesPaths(home=applied).plugin_dir("customer-support")
+    plugin_dir = HermesPaths(home=applied).policy_plugin_dir("customer-support")
     profile = HermesPaths(home=applied).profile_dir("customer-support")
     assert plugin_dir.parent == profile / "plugins"
 
 
 def test_shipped_decision_module_is_identical_to_the_platform_one(applied):
     """Two implementations of a security decision will eventually disagree."""
-    installed = HermesPaths(home=applied).plugin_dir("customer-support") / "_decide.py"
+    installed = HermesPaths(home=applied).policy_plugin_dir("customer-support") / "_decide.py"
     source = Path("nova/policy/decide.py")
     assert installed.read_text(encoding="utf-8") == source.read_text(encoding="utf-8")
 
@@ -90,7 +90,7 @@ def test_no_plugin_is_installed_without_a_declared_policy(tmp_path, runtime, aud
     )
 
     apply_bundle(load_bundle(root), runtime, audit=audit)
-    assert not HermesPaths(home=home).plugin_dir("customer-support").exists()
+    assert not HermesPaths(home=home).policy_plugin_dir("customer-support").exists()
     assert not HermesPaths(home=home).policy_path("customer-support").exists()
 
 

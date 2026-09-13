@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 from nova.policy.decide import POLICY_SCHEMA_VERSION
 from nova.policy.model import PolicySpec
@@ -127,18 +127,36 @@ def policy_identity(document: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in document.items() if key not in RUNTIME_INJECTED_KEYS}
 
 
-def agent_digest(spec: AgentSpec, policy: Optional[CompiledPolicy]) -> str:
-    """Stable identity of an agent as materialized: its spec plus its policy.
+def agent_digest(
+    spec: AgentSpec,
+    policy: Optional[CompiledPolicy],
+    knowledge: Optional[Mapping[str, Any]] = None,
+) -> str:
+    """Stable identity of an agent as materialized: its spec, its policy, its knowledge grant.
 
     The single definition, used by the materializer when it writes provenance and by the
     control plane when it reports drift. Two definitions would disagree, and the
     disagreement would show as an agent permanently "out of sync".
+
+    The knowledge grant belongs here for a reason that is easy to miss: an agent's spec names
+    its corpora by id, but the corpus *titles and descriptions* come from ``knowledge.yaml``
+    and are compiled into the tool description the model reads. Editing a title with the
+    spec untouched changes what the model sees, so it has to change the digest too — or the
+    next apply would report the agent up to date while its tool still describes a corpus by
+    its old name. ``index_path`` and ``audit_log`` are stripped for the same reason
+    :data:`RUNTIME_INJECTED_KEYS` are: where the files live is deployment, not identity.
     """
-    if policy is None:
+    if policy is None and not knowledge:
         return spec.digest()
-    payload = json.dumps(
-        {"spec": spec.to_dict(), "policy": policy_identity(policy.document)},
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    payload: dict[str, Any] = {"spec": spec.to_dict()}
+    if policy is not None:
+        payload["policy"] = policy_identity(policy.document)
+    if knowledge:
+        payload["knowledge"] = {
+            key: value
+            for key, value in knowledge.items()
+            if key not in RUNTIME_INJECTED_KEYS and key not in ("index_path",)
+        }
+    return "sha256:" + hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()

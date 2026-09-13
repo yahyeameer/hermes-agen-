@@ -17,6 +17,7 @@ from typing import Any, Mapping, Optional
 
 from nova import __version__
 from nova.audit import AuditLog
+from nova.errors import NovaError
 from nova.policy import agent_digest, compile_policy, decide
 from nova.policy.limits import ENFORCING_CLASSES
 from nova.runtime.base import AgentRuntime
@@ -96,6 +97,8 @@ class ControlAPI:
             return self.decisions(query)
         if tail == "/budget":
             return self.budget()
+        if tail == "/knowledge":
+            return self.knowledge()
         return _error(404, f"no such route: {path}")
 
     # -- routes ---------------------------------------------------------------
@@ -141,7 +144,9 @@ class ControlAPI:
         rows: list[dict[str, Any]] = []
         for spec in self.bundle.agents:
             live = applied.get(spec.id)
-            declared_digest = agent_digest(spec, self._compiled(spec.id))
+            declared_digest = self.runtime.expected_digest(
+                spec, policy=self._compiled(spec.id), knowledge=self.bundle.knowledge
+            )
             rows.append(
                 {
                     "id": spec.id,
@@ -199,6 +204,74 @@ class ControlAPI:
                 "counts": counts,
                 "needs_attention": sum(1 for view in views if view.needs_attention),
                 "filtered_by_agent": agent_id,
+            },
+        )
+
+    def knowledge(self) -> Response:
+        """Declared corpora, what is actually indexed, and which agents can read each.
+
+        Three facts that live in three places — the bundle, the index, and each agent's
+        grant — and are only useful together. "Who can read the handbook" and "is the
+        handbook actually indexed" are the two questions asked about a knowledge
+        deployment, and neither is answerable from one source alone.
+        """
+        declared = self.bundle.knowledge.sources
+        readers: dict[str, list[str]] = {}
+        for spec in self.bundle.agents:
+            for source_id in spec.knowledge.sources:
+                readers.setdefault(source_id, []).append(spec.id)
+
+        indexed: dict[str, dict[str, int]] = {}
+        index_detail = ""
+        index_path = self.runtime.knowledge_index_path
+        if index_path.is_file():
+            try:
+                from nova.knowledge import KnowledgeIndex
+
+                with KnowledgeIndex.open(index_path, create=False) as index:
+                    indexed = index.stats()
+            except NovaError as exc:
+                index_detail = str(exc)
+        else:
+            index_detail = "no index yet — run `nova knowledge ingest`"
+
+        sources = [
+            {
+                "id": source.id,
+                "title": source.display_title,
+                "description": source.description,
+                "classification": source.classification,
+                "root": str(source.root),
+                "readable_by": sorted(readers.get(source.id, [])),
+                "indexed": source.id in indexed,
+                "documents": indexed.get(source.id, {}).get("documents", 0),
+                "chunks": indexed.get(source.id, {}).get("chunks", 0),
+                "bytes": indexed.get(source.id, {}).get("bytes", 0),
+            }
+            for source in declared
+        ]
+
+        # A corpus in the index that the bundle no longer declares is still searchable by
+        # any agent whose grant was not re-applied. Surfaced rather than filtered out.
+        undeclared = sorted(set(indexed) - {source.id for source in declared})
+
+        return Response(
+            200,
+            {
+                "retrieval_enabled": self.runtime.capabilities.knowledge_retrieval,
+                "document_extraction": self.runtime.capabilities.document_extraction,
+                "index_path": str(index_path),
+                "index_detail": index_detail,
+                "sources": sources,
+                "undeclared_in_index": undeclared,
+                "agents": [
+                    {
+                        "id": spec.id,
+                        "display_name": self.bundle.identity.display_name_for(spec.id, spec.name),
+                        "sources": list(spec.knowledge.sources),
+                    }
+                    for spec in self.bundle.agents
+                ],
             },
         )
 

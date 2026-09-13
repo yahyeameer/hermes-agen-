@@ -111,6 +111,8 @@ edit is the single most useful habit in this repository.
 | Worker spawn behaviour | The dispatcher's `spawn_fn` hook | none |
 | Dashboard authentication | `plugins/dashboard_auth/` | none |
 | Tracing | `plugins/observability/` | none |
+| Giving one agent a new tool | A **plugin** in `<profile>/plugins/<name>/` with `register(ctx)` + `provides_tools`. A worker runs with its profile as the runtime home, so plugin discovery scopes it to exactly that agent | none |
+| Document extraction (PDF, Office, OpenDocument) | The runtime's own extractors, borrowed through `AgentRuntime.extract_text()` — imported **lazily, inside an adapter** | none |
 
 **If you are about to edit core, you have probably missed a seam above. Check first.**
 
@@ -221,6 +223,9 @@ in the patch budget can genuinely conflict.
 |---|---|
 | `scripts/check_protected_identifiers.py` | §2.2 and §2.4 — no rename of protected identifiers, absolute `[Hh]ermes-[0-9]` exclusion |
 | Import-direction check | §1 — no upstream module imports `platform.*` |
+| `test_platform_layer_never_imports_the_runtime_at_module_level` | §1 — NOVA loads with only the stdlib and PyYAML, adapters included |
+| `test_only_an_adapter_may_import_the_runtime_lazily` | §1 — a borrowed runtime capability stays inside `nova/runtime/<adapter>/` |
+| `test_the_adapter_packages_still_import_without_their_runtime` | §1 — proves the lazy import stayed lazy, in a subprocess |
 | Patch-budget check | §7 — an upstream-owned file changed without a ledger entry fails CI |
 | `merge=brandours` in `.gitattributes` | §8 — brand-owned files resolve without manual attention |
 
@@ -233,5 +238,7 @@ in the patch budget can genuinely conflict.
 3. Pointing the customer dashboard at a Hermes endpoint because it was quicker.
 4. Replacing a `HERMES_*` variable or `~/.hermes` instead of aliasing it.
 5. A find-and-replace that catches `Hermes-4-405B`.
+6. Letting retrieved customer documents into the system prompt, or scoping a knowledge
+   search by telling the model which corpora it may read rather than filtering in SQL.
 
 If a change you are about to make matches one of these, stop and re-read §3.

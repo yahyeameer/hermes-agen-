@@ -9,6 +9,7 @@ rewriting the platform.
 from nova.runtime.base import (
     TASK_STATES,
     AgentRuntime,
+    ExtractedDocument,
     MaterializedAgent,
     MaterializeResult,
     RuntimeCapabilities,
@@ -22,6 +23,7 @@ from nova.runtime.registry import available_runtimes, get_runtime, register_runt
 __all__ = [
     "TASK_STATES",
     "AgentRuntime",
+    "ExtractedDocument",
     "MaterializedAgent",
     "MaterializeResult",
     "ModelUsage",
