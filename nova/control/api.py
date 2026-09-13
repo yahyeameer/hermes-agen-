@@ -193,11 +193,14 @@ class ControlAPI:
                 f"runtime {self.runtime.name!r} cannot deliver channels, so this control "
                 "plane will not offer a connect button that does nothing",
             )
+        from nova.channels.derive import plan_derivations
+
         dry_run = bool(payload.get("dry_run"))
         result = self.runtime.apply_channels(
             self.bundle.channels,
             audit=self.audit.with_actor(principal.name),
             correlation_id=new_correlation_id(),
+            derivations=plan_derivations(self.bundle),
             dry_run=dry_run,
         )
         return Response(200, {**result, "actor": principal.name, "dry_run": dry_run})
@@ -253,10 +256,13 @@ class ControlAPI:
         provider's adapter reads, and which of them are still absent per agent. That is the
         most a control plane should ever be able to say about a secret.
         """
+        from nova.channels.derive import plan_derivations
         from nova.channels.providers import PROVIDERS
 
+        derivations = plan_derivations(self.bundle)
         readiness = {
-            row["id"]: row for row in self.runtime.channel_readiness(self.bundle.channels)
+            row["id"]: row
+            for row in self.runtime.channel_readiness(self.bundle.channels, derivations)
         }
         rows = []
         for channel in self.bundle.channels:
@@ -275,6 +281,10 @@ class ControlAPI:
                     "caveat": provider.caveat,
                     "allowed_agents": list(channel.allowed_agents),
                     "routes": [route.to_dict() for route in channel.routes],
+                    "approval_required_for": list(channel.approval.required_for),
+                    "derived_agents": [
+                        d.to_dict() for d in derivations if d.channel_id == channel.id
+                    ],
                     "required_env": ready.get("required_env", list(provider.required_env)),
                     "missing_by_agent": ready.get("missing_by_agent", {}),
                     "status": (

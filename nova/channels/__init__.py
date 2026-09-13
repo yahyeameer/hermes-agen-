@@ -20,8 +20,10 @@ from nova.channels.providers import (
     Verification,
     get_provider,
 )
+from nova.channels.derive import DerivedAgent, derive_specs, plan_derivations, route_target
 from nova.channels.spec import (
     CHANNELS_FILE,
+    ChannelApproval,
     ChannelRoute,
     ChannelSpec,
     check_agents_exist,
@@ -31,6 +33,11 @@ from nova.channels.spec import (
 
 __all__ = [
     "CHANNELS_FILE",
+    "ChannelApproval",
+    "DerivedAgent",
+    "derive_specs",
+    "plan_derivations",
+    "route_target",
     "PROVIDERS",
     "PROVIDERS_BY_ID",
     "Capability",

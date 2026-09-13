@@ -93,8 +93,17 @@ def platform_name(provider_id: str) -> str:
         ) from None
 
 
-def plan(channels: Sequence[ChannelSpec]) -> ChannelPlan:
-    """Translate a declaration into runtime configuration, without writing anything."""
+def plan(
+    channels: Sequence[ChannelSpec], derivations: Sequence[Any] = ()
+) -> ChannelPlan:
+    """Translate a declaration into runtime configuration, without writing anything.
+
+    ``derivations`` are the channel-scoped agent variants (see ``nova/channels/derive.py``).
+    A route to an agent that has a variant on this channel is pointed at the variant, which
+    is how a per-channel approval requirement reaches an enforcement hook that is never told
+    which channel it is serving.
+    """
+    from nova.channels.derive import route_target
     platforms: dict[str, Any] = {}
     routes: list[dict[str, Any]] = []
     served: list[str] = []
@@ -118,13 +127,17 @@ def plan(channels: Sequence[ChannelSpec]) -> ChannelPlan:
 
         existing = platforms.get(name, {})
         platforms[name] = {**existing, **dict(channel.settings), "enabled": True}
-        served.extend(channel.allowed_agents)
+        # The grant, as the runtime will enforce it: where a variant exists it is the thing
+        # that must be served, and the base agent is not reachable over this channel at all.
+        served.extend(
+            route_target(derivations, channel.id, agent) for agent in channel.allowed_agents
+        )
 
         for index, route in enumerate(channel.routes):
             entry: dict[str, Any] = {
                 "name": route.name or f"{channel.id}:{index}",
                 "platform": name,
-                "profile": route.agent,
+                "profile": route_target(derivations, channel.id, route.agent),
             }
             # Quoted as strings deliberately: the runtime warns that an unquoted numeric id
             # loaded as an int "can never match an inbound id".
@@ -188,11 +201,17 @@ def merge_into(existing: Optional[Mapping[str, Any]], plan_: ChannelPlan) -> dic
     return document
 
 
-def apply(home: Path, channels: Sequence[ChannelSpec], *, dry_run: bool = False) -> ChannelPlan:
+def apply(
+    home: Path,
+    channels: Sequence[ChannelSpec],
+    *,
+    derivations: Sequence[Any] = (),
+    dry_run: bool = False,
+) -> ChannelPlan:
     """Write the gateway configuration for a channel declaration. Returns the plan."""
     from nova.runtime.hermes import materialize as _materialize
 
-    plan_ = plan(channels)
+    plan_ = plan(channels, derivations)
     if dry_run:
         return plan_
 
@@ -218,23 +237,32 @@ def apply(home: Path, channels: Sequence[ChannelSpec], *, dry_run: bool = False)
     return plan_
 
 
-def readiness(channels: Sequence[ChannelSpec], *, home: Path) -> list[dict[str, Any]]:
+def readiness(
+    channels: Sequence[ChannelSpec], *, home: Path, derivations: Sequence[Any] = ()
+) -> list[dict[str, Any]]:
     """Which credential variables each connection still needs, per granted agent.
 
     Reported rather than resolved: NOVA reads variable *names* from the agent's ``.env`` and
     never their values, for the same reason it never writes them. A connection whose
     credential is missing is not broken configuration — it is configuration waiting for the
     operator step NOVA deliberately cannot take.
+
+    Checked against the profile that will actually run. Where a channel tightened approval
+    the conversation reaches a variant, and the variant's ``.env`` is the one the adapter
+    reads — reporting the base agent's would tell an operator the credential was in place
+    while every message failed.
     """
     from nova._env import read_env_file
+    from nova.channels.derive import route_target
 
     rows: list[dict[str, Any]] = []
     for channel in channels:
         required = list(channel.required_env)
         per_agent: dict[str, list[str]] = {}
         for agent in channel.allowed_agents:
-            present = read_env_file(Path(home) / "profiles" / agent / ".env")
-            per_agent[agent] = [name for name in required if name not in present]
+            profile = route_target(derivations, channel.id, agent)
+            present = read_env_file(Path(home) / "profiles" / profile / ".env")
+            per_agent[profile] = [name for name in required if name not in present]
         rows.append(
             {
                 "id": channel.id,

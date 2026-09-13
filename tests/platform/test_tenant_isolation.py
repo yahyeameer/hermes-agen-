@@ -25,7 +25,7 @@ from nova.runtime.hermes.materialize import Provenance, check_tenant
 from nova.runtime.hermes.paths import HermesPaths
 from nova.spec import load_bundle
 
-from .conftest import EXAMPLE_BUNDLE
+from .conftest import EXAMPLE_AGENTS, EXAMPLE_BUNDLE
 
 
 def bundle_for(tmp_path, tenant: str):
@@ -143,7 +143,7 @@ def test_apply_is_a_true_no_op_once_adoption_has_happened(tmp_path):
 
     report, _ = deploy(home, acme)
     assert report.created == () and report.changed == ()
-    assert set(report.unchanged) == {"customer-support", "operations"}
+    assert set(report.unchanged) == EXAMPLE_AGENTS
 
 
 def test_an_adopted_profile_is_then_protected_from_another_tenant(tmp_path):

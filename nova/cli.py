@@ -737,6 +737,7 @@ def _channels(args) -> int:
     import getpass
 
     from nova.audit import new_correlation_id
+    from nova.channels.derive import plan_derivations
     from nova.channels.providers import PROVIDERS
 
     if args.channels_command == "providers":
@@ -758,8 +759,10 @@ def _channels(args) -> int:
     bundle = load_bundle(args.bundle)
     runtime = get_runtime(args.runtime, home=args.home, tenant_id=bundle.tenant_id)
 
+    derivations = plan_derivations(bundle)
+
     if args.channels_command == "list":
-        rows = runtime.channel_readiness(bundle.channels)
+        rows = runtime.channel_readiness(bundle.channels, derivations)
         if args.json:
             print(json.dumps(rows, indent=2))
             return 0
@@ -776,6 +779,8 @@ def _channels(args) -> int:
                 state = "disabled"
             print(f"\n  {channel.display_name or channel.id}  ({channel.provider})  —  {state}")
             print(f"    may reach: {', '.join(channel.allowed_agents)}")
+            if channel.approval.declared:
+                print(f"    needs a human for: {', '.join(channel.approval.required_for)}")
             for route in channel.routes:
                 where = route.conversation or route.workspace or "everything else"
                 print(f"    {where:28} -> {route.agent}")
@@ -787,7 +792,7 @@ def _channels(args) -> int:
     if args.channels_command == "plan":
         result = runtime.apply_channels(
             bundle.channels, audit=NullAuditLog(), correlation_id=new_correlation_id(),
-            dry_run=True,
+            derivations=derivations, dry_run=True,
         )
         if args.json:
             print(json.dumps(result, indent=2))
@@ -797,6 +802,11 @@ def _channels(args) -> int:
             where = route.get("chat_id") or route.get("guild_id") or "(catch-all)"
             print(f"  {route['platform']:12} {where:24} -> {route['profile']}")
         print(f"  agents served: {', '.join(result['served_agents']) or '(none)'}")
+        for entry in derivations:
+            print(
+                f"  approval:  {entry.base_agent} on {entry.channel_id} additionally "
+                f"escalates {', '.join(entry.added_approvals)} (as {entry.id})"
+            )
         for warning in result["warnings"]:
             print(f"  warning:  {warning}")
         print("\nNothing was written. Re-run `nova channels apply` to apply.")
@@ -808,7 +818,8 @@ def _channels(args) -> int:
         return 1
     audit = AuditLog.for_home(runtime.state_location, tenant_id=bundle.tenant_id, actor=actor)
     result = runtime.apply_channels(
-        bundle.channels, audit=audit, correlation_id=new_correlation_id()
+        bundle.channels, audit=audit, correlation_id=new_correlation_id(),
+        derivations=derivations,
     )
     print(f"connected {len(bundle.channels)} channel(s), "
           f"{len(result['routes'])} route(s)   (by {actor})")

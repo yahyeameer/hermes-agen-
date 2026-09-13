@@ -43,7 +43,7 @@ class RecordingRuntime:
         self.calls: list[dict] = []
         self._applied = applied
 
-    def channel_readiness(self, channels):
+    def channel_readiness(self, channels, derivations=()):
         return [
             {"id": c.id, "provider": c.provider, "required_env": list(c.required_env),
              "missing_by_agent": {a: list(c.required_env) for a in c.allowed_agents},

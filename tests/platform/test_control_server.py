@@ -242,10 +242,19 @@ def test_the_built_dashboard_is_committed():
     """The control server is a stdlib file server: it cannot build anything. Whatever is in
     ``static/`` is what an operator gets, so the build output is committed deliberately."""
     index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-    assets = list((STATIC_DIR / "assets").glob("*.js"))
+    assets = list((STATIC_DIR / "assets").glob("*"))
     assert assets, "no built dashboard bundle is present"
+
+    # Both directions, because each catches a different mistake and I made the second one:
+    # an asset on disk that nothing references is a stale build, and an asset referenced
+    # but absent is a page that loads without its stylesheet.
     for asset in assets:
         assert asset.name in index, f"{asset.name} is not referenced by index.html (stale build?)"
+    for referenced in re.findall(r'assets/[A-Za-z0-9._-]+', index):
+        assert (STATIC_DIR / referenced).is_file(), (
+            f"index.html references {referenced}, which is not present — the page would "
+            f"load without it"
+        )
 
 
 def test_dashboard_has_no_external_dependencies():

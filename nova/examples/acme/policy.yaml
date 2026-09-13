@@ -33,6 +33,10 @@ permissions:
     description: Read warehouse and stock data
     tools: [erp_stock_query]
 
+  contact_suppliers:
+    description: Email suppliers about stock and deliveries
+    tools: [email_send]
+
 # Tools every agent keeps regardless of its permissions. Without these an allow-list
 # would produce agents that run work and never close it.
 baseline_tools:

@@ -260,6 +260,7 @@ class HermesRuntime(AgentRuntime):
         *,
         audit: AuditLog,
         correlation_id: str,
+        derivations: Sequence[Any] = (),
         dry_run: bool = False,
     ) -> dict[str, Any]:
         detail = {
@@ -267,9 +268,10 @@ class HermesRuntime(AgentRuntime):
             "connections": len(channels),
             "providers": sorted({c.provider for c in channels}),
             "agents_granted": sorted({a for c in channels for a in c.allowed_agents}),
+            "derived_agents": [d.id for d in derivations],
         }
         if dry_run:
-            plan = _channels.plan(channels)
+            plan = _channels.plan(channels, derivations)
             audit.record(
                 "channel.plan",
                 correlation_id=correlation_id,
@@ -284,12 +286,16 @@ class HermesRuntime(AgentRuntime):
             subject=self.tenant_id,
             detail=detail,
         ) as outcome:
-            plan = _channels.apply(self.paths.home, channels, dry_run=False)
+            plan = _channels.apply(
+                self.paths.home, channels, derivations=derivations, dry_run=False
+            )
             outcome.update(plan.to_dict())
         return plan.to_dict()
 
-    def channel_readiness(self, channels: Sequence[Any]) -> list[dict[str, Any]]:
-        return _channels.readiness(channels, home=self.paths.home)
+    def channel_readiness(
+        self, channels: Sequence[Any], derivations: Sequence[Any] = ()
+    ) -> list[dict[str, Any]]:
+        return _channels.readiness(channels, home=self.paths.home, derivations=derivations)
 
     def never_archive(self) -> tuple[str, ...]:
         """The runtime's own state, taken from the list the materializer already refuses

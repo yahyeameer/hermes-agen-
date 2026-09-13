@@ -173,8 +173,26 @@ def _apply_bundle(
 
     results: list[MaterializeResult] = []
     skipped: list[str] = []
-    selected = bundle.agents if include_disabled else bundle.enabled_agents()
-    for spec in bundle.agents:
+
+    # Channel-scoped agent variants. A channel that tightens approval cannot be enforced by
+    # the policy hook — the hook is never told which channel it is serving — so the tighter
+    # posture becomes its own profile with its own compiled policy, which the hook does
+    # enforce. See nova/channels/derive.py for why this is the honest shape rather than a
+    # rule that would silently never fire.
+    from nova.channels.derive import derive_specs, plan_derivations
+
+    derivations = plan_derivations(bundle)
+    derived = derive_specs(bundle)
+    for entry in derivations:
+        warnings.append(
+            f"{entry.base_agent}: reached over {entry.channel_id!r} as {entry.id!r}, which "
+            f"additionally escalates {', '.join(entry.added_approvals)}. It is a separate "
+            f"profile, so it does not share conversation history with {entry.base_agent!r}"
+        )
+
+    all_specs = tuple(bundle.agents) + derived
+    selected = all_specs if include_disabled else tuple(s for s in all_specs if s.enabled)
+    for spec in all_specs:
         if spec not in selected:
             skipped.append(spec.id)
             continue
@@ -265,8 +283,16 @@ def _apply_bundle(
 
 
 def _orphans(bundle: TenantBundle, runtime: AgentRuntime) -> list[str]:
-    """NOVA-managed agents present in the runtime but absent from the bundle."""
+    """NOVA-managed agents present in the runtime but absent from the bundle.
+
+    Channel-scoped variants count as declared: they exist because a channel declared an
+    approval requirement, and reporting them as orphans would tell an operator to delete the
+    profiles their own channel policy depends on.
+    """
+    from nova.channels.derive import plan_derivations
+
     declared = {spec.id for spec in bundle.agents}
+    declared |= {entry.id for entry in plan_derivations(bundle)}
     return sorted(
         agent.agent_id
         for agent in runtime.list_agents()

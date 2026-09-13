@@ -23,6 +23,9 @@ delegation:
 
 permissions:
   - read_inventory
+  # Operations emails suppliers directly. Internally that needs no sign-off; over a
+  # customer-facing channel it does — see the approval block in channels.yaml.
+  - contact_suppliers
 
 limits:
   max_concurrent_tasks: 2

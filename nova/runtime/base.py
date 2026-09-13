@@ -660,6 +660,7 @@ class AgentRuntime(ABC):
         *,
         audit: AuditLog,
         correlation_id: str,
+        derivations: Sequence[Any] = (),
         dry_run: bool = False,
     ) -> dict[str, Any]:
         """Make the runtime deliver declared conversations to the agents that were granted.
@@ -684,7 +685,9 @@ class AgentRuntime(ABC):
             "(capabilities.channel_delivery is False)"
         )
 
-    def channel_readiness(self, channels: Sequence[Any]) -> list[dict[str, Any]]:
+    def channel_readiness(
+        self, channels: Sequence[Any], derivations: Sequence[Any] = ()
+    ) -> list[dict[str, Any]]:
         """Which credential variables each connection still needs, per granted agent.
 
         Names, never values — the same rule the model-provider seam runs on. A connection

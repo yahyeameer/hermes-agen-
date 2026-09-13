@@ -78,6 +78,11 @@ def test_no_plugin_is_installed_without_a_declared_policy(tmp_path, runtime, aud
     root = tmp_path / "b"
     shutil.copytree(EXAMPLE_BUNDLE, root)
     (root / "policy.yaml").unlink()
+    # The example's channel escalates a business action, which a bundle with no policy
+    # cannot express. Removing the policy means removing that too — a channel asking for an
+    # approval nothing defines is refused at load, which is its own correct error and is
+    # covered in test_channels.py.
+    (root / "channels.yaml").unlink()
     support = root / "agents" / "customer-support.yaml"
     text = support.read_text(encoding="utf-8")
     text = text.replace("permissions:\n  - read_customers\n  - create_ticket\n", "")

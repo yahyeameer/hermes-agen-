@@ -229,6 +229,25 @@ export default function App() {
                             <Badge key={a} variant="secondary" className="font-normal">{a}</Badge>
                           ))}
                         </div>
+                        {(channel.approval_required_for ?? []).length ? (
+                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                            <Hint text="Anything reached over this channel escalates these to a human, on top of what the agent already escalates everywhere. A channel can tighten approval, never loosen it.">
+                              <span className="text-warn text-xs">needs a human for</span>
+                            </Hint>
+                            {(channel.approval_required_for as string[]).map((a) => (
+                              <Badge key={a} variant="warn" className="font-normal">{a}</Badge>
+                            ))}
+                          </div>
+                        ) : null}
+                        {(channel.derived_agents ?? []).length ? (
+                          <div className="text-muted-foreground mt-1 text-[11px]">
+                            <Hint text="The runtime's policy hook is never told which channel it is serving, so a tighter posture becomes its own profile with its own compiled policy. It does not share conversation history with the base agent.">
+                              runs as
+                            </Hint>
+                            {" "}
+                            {(channel.derived_agents as any[]).map((d) => d.id).join(", ")}
+                          </div>
+                        ) : null}
                         {(channel.routes ?? []).length ? (
                           <div className="text-muted-foreground mt-1 font-mono text-[11px]">
                             {(channel.routes as any[]).map((r) =>

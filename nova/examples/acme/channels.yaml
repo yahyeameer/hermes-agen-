@@ -17,6 +17,19 @@ channels:
       - customer-support
       - operations
 
+    # Anything reached over this channel escalates these to a human, on top of whatever
+    # the agent already escalates everywhere. Additive only: a channel can tighten
+    # approval, never loosen it — a permission that could be widened by connecting a
+    # messaging app would make the channel list part of the security review.
+    #
+    # This costs a profile. `customer-support` reached over this channel becomes
+    # `customer-support__acme-support-telegram`, with its own compiled policy, because the
+    # runtime's policy hook is never told which channel it is serving. See
+    # docs/PHASE_10.md for why that is the honest shape.
+    approval:
+      required_for:
+        - send_external_email
+
     routes:
       # Most specific wins, exactly as the runtime orders them: a named conversation beats
       # the catch-all, so the escalations group reaches operations and everything else

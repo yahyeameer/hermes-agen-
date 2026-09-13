@@ -12,6 +12,13 @@ from nova.spec import load_bundle
 
 EXAMPLE_BUNDLE = Path(__file__).resolve().parents[2] / "nova" / "examples" / "acme"
 
+#: Agents the example bundle materializes. The third is a channel-scoped variant: the
+#: example's Telegram connection requires approval for ``send_external_email``, which
+#: ``operations`` can perform, so that agent gets its own profile with its own compiled
+#: policy (see ``nova/channels/derive.py``). Named here rather than repeated as a literal
+#: in every count assertion, so the reason a third agent exists is written down once.
+EXAMPLE_AGENTS = {"customer-support", "operations", "operations__acme-support-telegram"}
+
 
 @pytest.fixture
 def bundle():

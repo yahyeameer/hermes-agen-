@@ -10,12 +10,12 @@ from nova.apply import apply_bundle
 from nova.runtime.hermes.paths import HermesPaths
 from nova.spec import load_bundle
 
-from .conftest import EXAMPLE_BUNDLE
+from .conftest import EXAMPLE_AGENTS, EXAMPLE_BUNDLE
 
 
 def test_apply_creates_every_enabled_agent(bundle, runtime, audit, home):
     report = apply_bundle(bundle, runtime, audit=audit)
-    assert set(report.created) == {"customer-support", "operations"}
+    assert set(report.created) == EXAMPLE_AGENTS
     paths = HermesPaths(home=home)
     assert paths.config_path("customer-support").is_file()
     assert paths.config_path("operations").is_file()
@@ -24,7 +24,7 @@ def test_apply_creates_every_enabled_agent(bundle, runtime, audit, home):
 def test_apply_is_idempotent(bundle, runtime, audit):
     apply_bundle(bundle, runtime, audit=audit)
     second = apply_bundle(bundle, runtime, audit=audit)
-    assert set(second.unchanged) == {"customer-support", "operations"}
+    assert set(second.unchanged) == EXAMPLE_AGENTS
     assert second.created == ()
 
 
@@ -47,7 +47,9 @@ def test_disabled_agents_are_skipped_not_materialized(tmp_path, runtime, audit, 
     path = root / "agents" / "operations.yaml"
     path.write_text(path.read_text(encoding="utf-8") + "\nenabled: false\n", encoding="utf-8")
     report = apply_bundle(load_bundle(root), runtime, audit=audit)
-    assert report.skipped == ("operations",)
+    # The channel-scoped variant is skipped with its base: a profile for a disabled agent
+    # is a profile nothing routes to.
+    assert set(report.skipped) == {"operations", "operations__acme-support-telegram"}
     assert not HermesPaths(home=home).profile_dir("operations").exists()
 
 

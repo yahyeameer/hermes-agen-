@@ -79,6 +79,26 @@ class ChannelRoute:
 
 
 @dataclass(frozen=True)
+class ChannelApproval:
+    """Business actions this channel escalates to a human, on top of the agent's own.
+
+    Additive only, and deliberately so. A channel cannot *remove* an approval the tenant
+    policy or the agent already requires: a permission that could be widened by connecting
+    a messaging app would make the channel list part of the security review, and the whole
+    point of declaring approvals in the policy is that they hold everywhere.
+    """
+
+    required_for: tuple[str, ...] = ()
+
+    @property
+    def declared(self) -> bool:
+        return bool(self.required_for)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"required_for": list(self.required_for)} if self.required_for else {}
+
+
+@dataclass(frozen=True)
 class ChannelSpec:
     """One connected channel, as the customer declared it."""
 
@@ -89,6 +109,8 @@ class ChannelSpec:
     #: **The grant.** Agents this connection may reach — nothing else, whatever a route says.
     allowed_agents: tuple[str, ...] = ()
     routes: tuple[ChannelRoute, ...] = ()
+    #: Extra human-approval requirements for anything reached over this channel.
+    approval: ChannelApproval = field(default_factory=ChannelApproval)
     #: Non-secret provider settings passed through to the runtime's own platform config.
     #: Guarded by :data:`FORBIDDEN_KEYS`.
     settings: Mapping[str, Any] = field(default_factory=dict)
@@ -116,6 +138,8 @@ class ChannelSpec:
         }
         if self.display_name:
             out["display_name"] = self.display_name
+        if self.approval.declared:
+            out["approval"] = self.approval.to_dict()
         if self.settings:
             out["settings"] = dict(self.settings)
         return out
@@ -271,6 +295,14 @@ def parse_channels(
         if settings and not isinstance(settings, Mapping):
             raise SpecError("must be a mapping", field=f"{prefix}.settings", source=source)
 
+        approval_doc = doc.child("approval")
+        approval = ChannelApproval()
+        if approval_doc is not None:
+            approval = ChannelApproval(
+                required_for=tuple(approval_doc.str_list("required_for", unique=True))
+            )
+            approval_doc.reject_unknown()
+
         spec = ChannelSpec(
             id=connection_id,
             provider=provider_id,
@@ -278,6 +310,7 @@ def parse_channels(
             enabled=doc.bool_("enabled", default=True),
             allowed_agents=allowed,
             routes=routes,
+            approval=approval,
             settings=dict(settings),
             source=source,
         )
