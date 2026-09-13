@@ -131,7 +131,8 @@ class HermesRuntime(AgentRuntime):
             # incident, and a plain record() carries no intent/commit pair.
             result = _materialize.materialize(
                 spec, self.paths, identity=identity, policy=policy, knowledge=grant,
-                provider=resolved, runtime_config=runtime_config, dry_run=True,
+                provider=resolved, runtime_config=runtime_config,
+                tenant_id=self.tenant_id, dry_run=True,
             )
             audit.record(
                 "agent.materialize_preview",
@@ -158,7 +159,8 @@ class HermesRuntime(AgentRuntime):
         ) as outcome:
             result = _materialize.materialize(
                 spec, self.paths, identity=identity, policy=policy, knowledge=grant,
-                provider=resolved, runtime_config=runtime_config, dry_run=False,
+                provider=resolved, runtime_config=runtime_config,
+                tenant_id=self.tenant_id, dry_run=False,
             )
             outcome.update(result.to_detail())
         return result
@@ -320,10 +322,16 @@ class HermesRuntime(AgentRuntime):
     # -- work read models -----------------------------------------------------
 
     def list_tasks(self, *, agent_id: str = "", limit: int = 200) -> list[TaskView]:
-        return _work.list_tasks(self.paths.home, agent_id=agent_id, limit=limit)
+        # Scoped to this deployment's tenant. The board is a shared surface — the runtime's
+        # own CLI and dashboard write to it too — so "every row in kanban.db" is not the
+        # same question as "this tenant's work", and answering the first while being asked
+        # the second is how one tenant's task titles reach another's dashboard.
+        return _work.list_tasks(
+            self.paths.home, agent_id=agent_id, limit=limit, tenant_id=self.tenant_id
+        )
 
     def get_task(self, task_id: str) -> Optional[TaskView]:
-        return _work.get_task(self.paths.home, task_id)
+        return _work.get_task(self.paths.home, task_id, tenant_id=self.tenant_id)
 
     def health(self) -> RuntimeHealth:
         present, detail = _work.store_status(self.paths.home)

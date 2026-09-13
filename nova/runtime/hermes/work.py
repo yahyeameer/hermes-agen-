@@ -122,17 +122,34 @@ def _columns(connection: sqlite3.Connection) -> str:
     return ", ".join(usable) if usable else "id, title, status"
 
 
-def list_tasks(home: Path, *, agent_id: str = "", limit: int = 200) -> list[TaskView]:
-    """Tasks the runtime holds, newest first. Empty when there is no work store yet."""
+def list_tasks(
+    home: Path, *, agent_id: str = "", limit: int = 200, tenant_id: str = ""
+) -> list[TaskView]:
+    """Tasks the runtime holds, newest first. Empty when there is no work store yet.
+
+    ``tenant_id`` restricts the result to work stamped for that tenant. An empty value
+    means unscoped, which is what a caller with no tenant identity gets — deliberately
+    permissive there, because the alternative is a control plane that silently shows
+    nothing when its tenant id is simply unset.
+    """
     limit = max(1, min(int(limit), 1000))
     with _readonly(work_store_path(home)) as connection:
         if connection is None:
             return []
-        query = f"SELECT {_columns(connection)} FROM tasks"  # noqa: S608 — names from PRAGMA
+        available = _columns(connection)
+        query = f"SELECT {available} FROM tasks"  # noqa: S608 — names from PRAGMA
+        clauses: list[str] = []
         params: list[object] = []
         if agent_id:
-            query += " WHERE assignee = ?"
+            clauses.append("assignee = ?")
             params.append(agent_id)
+        # Rows written before the tenant was stamped carry NULL/'' and stay visible: a
+        # filter that hid a deployment's own pre-existing work would read as data loss.
+        if tenant_id and "tenant" in available:
+            clauses.append("(tenant = ? OR tenant IS NULL OR tenant = '')")
+            params.append(tenant_id)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         try:
@@ -142,7 +159,13 @@ def list_tasks(home: Path, *, agent_id: str = "", limit: int = 200) -> list[Task
     return [_row_to_task(row) for row in rows]
 
 
-def get_task(home: Path, task_id: str) -> Optional[TaskView]:
+def get_task(home: Path, task_id: str, *, tenant_id: str = "") -> Optional[TaskView]:
+    """One task, or None when it is absent or belongs to another tenant.
+
+    A direct id lookup is the one place a tenant filter matters most: ids are guessable
+    from another tenant's dashboard, and "not found" is the right answer to a request for
+    someone else's work.
+    """
     with _readonly(work_store_path(home)) as connection:
         if connection is None:
             return None
@@ -153,7 +176,12 @@ def get_task(home: Path, task_id: str) -> Optional[TaskView]:
             ).fetchone()
         except sqlite3.Error:
             return None
-    return _row_to_task(row) if row is not None else None
+    if row is None:
+        return None
+    view = _row_to_task(row)
+    if tenant_id and view.tenant_id and view.tenant_id != tenant_id:
+        return None
+    return view
 
 
 def store_status(home: Path) -> tuple[bool, str]:

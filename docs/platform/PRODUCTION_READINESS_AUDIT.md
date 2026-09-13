@@ -20,10 +20,10 @@ Severity is about *deploying to a paying customer*, not about code quality:
 | 1 | No TLS on the control plane | Security | **Blocking** |
 | 2 | Bearer token passed as a CLI argument | Secrets | **Blocking** |
 | 3 | No identity, users or RBAC — one shared token | Auth | **Blocking** |
-| 4 | Tenant collision is silent: one home adopts another tenant's agents | Isolation | **Blocking** |
+| 4 | ~~Tenant collision is silent~~ | Isolation | **FIXED** |
 | 5 | No AWS deployment artifacts of any kind | AWS | **Blocking** |
 | 6 | `credential_isolation=True` overclaims | Enforcement | **Blocking** |
-| 7 | Control plane returns every task regardless of tenant | Isolation | Hardening |
+| 7 | ~~Control plane returns every task regardless of tenant~~ | Isolation | **FIXED** |
 | 8 | Audit log: no rotation, no retention, unbounded growth | Observability | Hardening |
 | 9 | Audit log is writable by the process it audits | Security | Hardening |
 | 10 | Effectively no operational logging | Observability | Hardening |
@@ -78,7 +78,16 @@ approved.
 *Fix shape:* OIDC in front of the control plane, with the subject carried into the audit
 record. Phase 2's approval design already anticipates a human gate; this is the missing half.
 
-### 4. Tenant collision is silent
+### 4. Tenant collision is silent — **FIXED**
+
+> Closed. `nova-agent.json` now records `tenant_id`; materializing over another
+> tenant's profile raises before anything is written. An unstamped profile is adopted
+> with a warning, and adoption forces a marker rewrite so it actually completes.
+> `tests/platform/test_tenant_isolation.py` (13 tests) reproduces the original
+> scenario. Two bugs surfaced while fixing it: adoption silently never completed
+> because the unchanged fast path skipped the rewrite, and `apply_bundle` was
+> discarding every per-agent `MaterializeResult.warning` — both fixed.
+
 
 Verified empirically. Applying two different tenant bundles to one `$NOVA_HOME`:
 
@@ -143,7 +152,11 @@ from the process environment on a host with more than one agent.
 
 ## Production-hardening
 
-### 7. Control plane returns every task regardless of tenant
+### 7. Control plane returns every task regardless of tenant — **FIXED**
+
+> Closed alongside 4. `list_tasks` and `get_task` filter by tenant; rows written
+> before stamping stay visible so a deployment never appears to lose its own work.
+
 
 `work.py::list_tasks` filters only by `assignee`; there is no `tenant` predicate, though the
 column exists and NOVA stamps it. Harmless under one-tenant-per-home; it is the second half

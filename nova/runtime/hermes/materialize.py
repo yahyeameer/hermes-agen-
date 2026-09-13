@@ -83,12 +83,15 @@ KNOWLEDGE_QUERY = Path(__file__).parents[2] / "knowledge" / "query.py"
 
 @dataclass(frozen=True)
 class Provenance:
-    """NOVA's record of what it wrote and from which spec."""
+    """NOVA's record of what it wrote, from which spec, and for whom."""
 
     version: int
     agent_id: str
     digest: str
     nova_version: str
+    #: The tenant this profile belongs to. Empty means the profile predates tenant
+    #: stamping; see :func:`check_tenant` for why that is adopted rather than refused.
+    tenant_id: str = ""
 
     @classmethod
     def read(cls, path: Path) -> Optional["Provenance"]:
@@ -98,13 +101,15 @@ class Provenance:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             # A corrupt marker still proves NOVA created the profile; treat it as owned
-            # but with an unknown digest so the next materialize rewrites it.
+            # but with an unknown digest so the next materialize rewrites it. The tenant is
+            # left empty, which routes through the same adoption path as an older marker.
             return cls(version=0, agent_id="", digest="", nova_version="")
         return cls(
             version=int(data.get("version", 0)),
             agent_id=str(data.get("agent_id", "")),
             digest=str(data.get("digest", "")),
             nova_version=str(data.get("nova_version", "")),
+            tenant_id=str(data.get("tenant_id", "")),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -113,11 +118,53 @@ class Provenance:
             "agent_id": self.agent_id,
             "digest": self.digest,
             "nova_version": self.nova_version,
+            "tenant_id": self.tenant_id,
             "_comment": (
-                "Written by NOVA. This file marks the profile as NOVA-managed; "
-                "deleting it makes NOVA refuse to update the profile."
+                "Written by NOVA. This file marks the profile as NOVA-managed and records "
+                "which tenant owns it; deleting it makes NOVA refuse to update the profile."
             ),
         }
+
+
+def check_tenant(
+    existing: Optional[Provenance], tenant_id: str, *, agent_id: str, profile_dir: Path
+) -> list[str]:
+    """Refuse to materialize over another tenant's profile. Returns warnings, or raises.
+
+    One deployment serves one tenant — that is the documented design, not a limitation
+    being worked around. The problem this closes is that the constraint used to be
+    *unenforced*: applying a second tenant's bundle to the same home reported
+    ``unchanged``, because the marker recorded no tenant and there was nothing to compare.
+
+    The consequence was not cosmetic. The second tenant's control plane would list the
+    first tenant's agents and work, its objectives would dispatch onto profiles the first
+    tenant materialized, and those profiles carry the first tenant's credentials in a
+    ``.env`` NOVA is forbidden to read. A constraint whose violation is silent and
+    cross-contaminating is a trap rather than a constraint.
+
+    **An unstamped profile is adopted, not refused.** An empty ``tenant_id`` means the
+    marker predates this check, and every such profile was written by a NOVA that already
+    enforced one tenant per home by convention. Refusing would break every existing
+    deployment to defend against a state none of them can be in. It is recorded as a
+    warning so the adoption is visible rather than assumed.
+    """
+    if existing is None or not tenant_id:
+        return []
+    if not existing.tenant_id:
+        return [
+            f"profile predates tenant stamping and is now recorded as owned by "
+            f"{tenant_id!r}. If this host ever served another tenant, verify that before "
+            "trusting this deployment"
+        ]
+    if existing.tenant_id != tenant_id:
+        raise RuntimeAdapterError(
+            f"profile {profile_dir} belongs to tenant {existing.tenant_id!r}, but this "
+            f"bundle is for {tenant_id!r}. One deployment serves one tenant: continuing "
+            f"would let {tenant_id!r} dispatch work onto agents that "
+            f"{existing.tenant_id!r} materialized, using credentials NOVA cannot see. Use "
+            "a separate NOVA_HOME per tenant"
+        )
+    return []
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -468,6 +515,7 @@ def plan_writes(
     knowledge: Optional[dict[str, Any]] = None,
     provider: Optional[ProviderSpec] = None,
     runtime_config: Optional[Mapping[str, Any]] = None,
+    tenant_id: str = "",
 ) -> dict[Path, str]:
     """Every file this materialization would write, as path -> content.
 
@@ -493,6 +541,10 @@ def plan_writes(
         # reports every agent as changed forever.
         digest=_combined_digest(spec, policy, knowledge),
         nova_version=_nova_version(),
+        # Deliberately not part of the digest: the tenant is who owns the profile, not
+        # what the agent is. Putting it in the digest would re-materialize every agent on
+        # upgrade to say something the marker already says.
+        tenant_id=tenant_id,
     )
     writes = {
         paths.config_path(spec.id): config_text,
@@ -540,6 +592,7 @@ def materialize(
     knowledge: Optional[dict[str, Any]] = None,
     provider: Optional[ProviderSpec] = None,
     runtime_config: Optional[Mapping[str, Any]] = None,
+    tenant_id: str = "",
     dry_run: bool = False,
 ) -> MaterializeResult:
     """Create or update one agent's profile. Idempotent.
@@ -558,24 +611,42 @@ def materialize(
             "directory if you want NOVA to manage this agent."
         )
 
+    # Before anything is written, and before the unchanged fast path below: adopting
+    # another tenant's profile must be impossible, not merely reported afterwards.
+    warnings.extend(check_tenant(existing, tenant_id, agent_id=spec.id, profile_dir=profile_dir))
+
     created = not profile_dir.exists()
     # The policy is part of what an agent IS, so it belongs in the identity that decides
     # whether a re-apply is a change. A policy edit with an unchanged spec must rewrite.
     digest = _combined_digest(spec, policy, knowledge)
-    writes = plan_writes(spec, paths, identity, policy, knowledge, provider, runtime_config)
+    writes = plan_writes(
+        spec, paths, identity, policy, knowledge, provider, runtime_config, tenant_id
+    )
+
+    # An unstamped marker must be rewritten even when nothing else changed, or adoption
+    # never completes: the digest matches, the fast path returns, and the profile stays
+    # unowned forever — leaving the very gap the tenant check exists to close. The spec
+    # has not changed, so this rewrites the marker and reports `changed`, which is honest:
+    # the profile's ownership record did change.
+    needs_tenant_stamp = bool(tenant_id) and existing is not None and not existing.tenant_id
 
     if existing is not None and existing.digest == digest and not created:
         # Still verify the files are actually present: a deleted SOUL.md with a stale
         # marker would otherwise be reported as up to date.
-        if all(path.is_file() for path in writes):
+        if all(path.is_file() for path in writes) and not needs_tenant_stamp:
             return MaterializeResult(
                 agent_id=spec.id,
                 created=False,
                 changed=False,
                 digest=digest,
                 location=profile_dir,
+                warnings=tuple(warnings),
             )
-        warnings.append("provenance was current but files were missing; rewriting")
+        if not needs_tenant_stamp:
+            # The adoption case already explained itself in check_tenant; saying it twice
+            # trains an operator to skim the warnings, which is how the one that matters
+            # gets missed.
+            warnings.append("provenance was current but files were missing; rewriting")
 
     warnings.extend(warnings_for(spec))
     if policy is not None:

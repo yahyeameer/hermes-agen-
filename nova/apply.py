@@ -143,6 +143,10 @@ def apply_bundle(
             # refusal, and which tenant it belongs to. Injected here, where both are in hand.
             compiled.document["tenant_id"] = bundle.tenant_id
             compiled.document["audit_log"] = str(audit.path)
+        # Warnings the materializer produced — a spec the runtime cannot fully honour, a
+        # profile being adopted by this tenant — were reaching the audit record and not the
+        # operator. A warning nobody sees is the same class of problem as a control nobody
+        # enforces, so they are surfaced here rather than only being archived.
         results.append(
             runtime.materialize_agent(
                 spec,
@@ -169,6 +173,9 @@ def apply_bundle(
                 f"{spec.id}: cannot run yet — {missing} is not set. Add it to {location}; "
                 "NOVA never writes credentials, so that file is yours and survives apply"
             )
+
+    for result in results:
+        warnings.extend(f"{result.agent_id}: {note}" for note in result.warnings)
 
     orphans = _orphans(bundle, runtime)
     if orphans:
