@@ -58,9 +58,10 @@ def test_refuses_non_loopback_bind_without_a_token(api):
         build_server(api, host="0.0.0.0", port=0)
 
 
-def test_non_loopback_bind_is_allowed_with_a_token(api):
-    server = build_server(api, host="127.0.0.1", port=0, token="s3cret")
-    server.server_close()
+def test_a_loopback_bind_needs_no_credentials(api):
+    """Superseded the old single-token contract: a loopback caller already has shell
+    access to everything the control plane reports. See test_control_auth.py."""
+    build_server(api, host="127.0.0.1", port=0).server_close()
 
 
 # -- read-only ---------------------------------------------------------------
@@ -76,8 +77,23 @@ def test_write_methods_are_refused(live, method):
 # -- auth --------------------------------------------------------------------
 
 
-def test_token_is_required_when_configured(api):
-    server = build_server(api, host="127.0.0.1", port=0, token="s3cret")
+def test_a_token_is_required_for_a_remote_caller(api, tmp_path):
+    """The single shared ``--token`` is gone; callers are named principals with roles.
+    ``behind_tls_proxy`` is what makes this loopback socket behave as a remote one —
+    see test_control_auth.py for why that is the right switch."""
+    from nova.control.auth import PrincipalStore, hash_token, new_token
+
+    secret = new_token()
+    path = tmp_path / "p.yaml"
+    path.write_text(
+        "principals:\n  - name: ops\n    role: admin\n"
+        f"    token_sha256: {hash_token(secret)}\n",
+        encoding="utf-8",
+    )
+    server = build_server(
+        api, host="127.0.0.1", port=0,
+        principals=PrincipalStore.load(path), behind_tls_proxy=True,
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     host, port = server.server_address[:2]
@@ -85,7 +101,7 @@ def test_token_is_required_when_configured(api):
     try:
         assert request(f"{base}/platform/v1/health")[0] == 401
         assert request(f"{base}/platform/v1/health", token="wrong")[0] == 401
-        assert request(f"{base}/platform/v1/health", token="s3cret")[0] == 200
+        assert request(f"{base}/platform/v1/health", token=secret)[0] == 200
     finally:
         server.shutdown()
         server.server_close()

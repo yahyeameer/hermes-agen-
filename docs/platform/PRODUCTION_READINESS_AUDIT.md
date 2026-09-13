@@ -17,9 +17,9 @@ Severity is about *deploying to a paying customer*, not about code quality:
 
 | # | Finding | Area | Severity |
 |---|---|---|---|
-| 1 | No TLS on the control plane | Security | **Blocking** |
-| 2 | Bearer token passed as a CLI argument | Secrets | **Blocking** |
-| 3 | No identity, users or RBAC — one shared token | Auth | **Blocking** |
+| 1 | ~~No TLS on the control plane~~ | Security | **FIXED** |
+| 2 | ~~Bearer token passed as a CLI argument~~ | Secrets | **FIXED** |
+| 3 | ~~No identity, users or RBAC~~ (OIDC still future) | Auth | **FIXED** |
 | 4 | ~~Tenant collision is silent~~ | Isolation | **FIXED** |
 | 5 | No AWS deployment artifacts of any kind | AWS | **Blocking** |
 | 6 | `credential_isolation=True` overclaims | Enforcement | **Blocking** |
@@ -42,7 +42,13 @@ Severity is about *deploying to a paying customer*, not about code quality:
 
 ## Blocking
 
-### 1. No TLS on the control plane
+### 1. No TLS on the control plane — **FIXED**
+
+> Closed. `--tls-cert`/`--tls-key` terminate TLS here (TLS 1.2 floor), or
+> `--behind-tls-proxy` acknowledges a proxy in front. A non-loopback bind without one
+> of the two is refused before the socket accepts. A bad certificate fails at
+> construction, not at the first request.
+
 
 `nova/control/server.py` is a `ThreadingHTTPServer` with no TLS anywhere — `grep` for
 `ssl|https|certfile` across `nova/control/` returns nothing. The bind guard forces a token
@@ -55,7 +61,13 @@ moment a customer fronts this with an ALB, the token is sniffable inside the VPC
 explicit `--behind-tls-proxy` acknowledgement, or accept a certfile. The first is less code
 and matches how it will actually be run.
 
-### 2. Bearer token passed as a CLI argument
+### 2. Bearer token passed as a CLI argument — **FIXED**
+
+> Closed. `--token` is gone. `nova token new` mints a token, prints it once, and
+> stores only its SHA-256 digest in `<home>/control-principals.yaml` — so NOVA never
+> holds the credential and a leaked principals file is an inconvenience, not an
+> incident.
+
 
 `nova serve --token <secret>`. The token is visible in `ps aux` to every user on the host and
 lands in shell history. This directly contradicts the principle Phase 6 was built on — NOVA
@@ -65,7 +77,21 @@ credential as a literal.
 *Fix shape:* read it from an environment variable or a file path, exactly as Phase 6 does for
 model credentials. `--token` should be refused, not merely deprecated.
 
-### 3. No identity, users or RBAC
+### 3. No identity, users or RBAC — **FIXED** (OIDC remains future)
+
+> Closed as far as it can be without a dependency. Callers are named `Principal`s
+> with a role; `viewer` sees operational state, `admin` also sees policy, decisions
+> and cost. Routes are gated per-role and an undeclared route requires admin, so a new
+> endpoint must be *declared* viewer-readable rather than becoming readable by
+> forgetting. The access log records the principal's name, and denials are logged.
+> Revoking one principal leaves the rest. A real IdP replaces `authenticate()` and
+> touches nothing else.
+>
+> One consequence worth knowing: a browser cannot send a bearer token, so a loopback
+> caller is treated as a local admin — they can already read the principals file and
+> every profile off disk, so a token protects nothing. `--behind-tls-proxy` disables
+> that, because a local proxy makes every forwarded request look loopback.
+
 
 There is one shared bearer token and no concept of a user. Consequences: no per-user audit
 (the log records `actor="nova-control"` for everyone), no read/approve separation, no

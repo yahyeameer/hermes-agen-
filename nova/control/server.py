@@ -10,9 +10,14 @@ Two safety properties, both tested:
 **Read-only.** Only GET and HEAD are served. Every other method is refused with 405
 before any handler runs, so no write path can be reached even by accident.
 
-**No accidental exposure.** Binding to anything other than loopback requires an explicit
-token. A control plane that lists a customer's agents and work must not become
-world-readable because someone passed ``--host 0.0.0.0`` while debugging.
+**No accidental exposure.** Binding to anything other than loopback requires both
+authentication and transport security. A control plane that lists a customer's agents and
+work must not become world-readable because someone passed ``--host 0.0.0.0`` while
+debugging, and a bearer token crossing a VPC in cleartext is not much better than no token.
+
+**Every caller is a principal.** Authentication resolves a named :class:`~nova.control.auth.Principal`
+with a role, and each route declares the minimum role it needs, so the access log records
+*who* read what rather than only that someone did.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ from typing import Optional
 from urllib.parse import parse_qs, urlparse
 
 from nova.control.api import ControlAPI
+from nova.control.auth import LOCAL_ADMIN, API_PREFIX_LEN, Principal, PrincipalStore
 from nova.errors import NovaError
 
 logger = logging.getLogger("nova.control")
@@ -54,7 +60,10 @@ class _Handler(BaseHTTPRequestHandler):
 
     # Injected by :func:`serve`.
     api: ControlAPI
-    token: str = ""
+    principals: PrincipalStore = PrincipalStore()
+    #: True when TLS is terminated by a proxy in front of this server. Only affects what
+    #: the operator was required to acknowledge; the socket here is plain either way.
+    behind_tls_proxy: bool = False
 
     # -- plumbing -------------------------------------------------------------
 
@@ -74,15 +83,40 @@ class _Handler(BaseHTTPRequestHandler):
     def _send_json(self, status: int, payload) -> None:
         self._send(status, json.dumps(payload, indent=2).encode("utf-8"), "application/json")
 
-    def _authorized(self) -> bool:
-        """Constant-time bearer check. No token configured means loopback-only serving."""
-        if not self.token:
-            return True
+    def _is_loopback_client(self) -> bool:
+        """Whether this request came from this host.
+
+        **Not trusted when a TLS proxy sits in front.** A proxy terminating TLS on the same
+        machine makes every forwarded request look local, which would turn loopback trust
+        into "anyone on the internet is a local admin". The operator states the proxy is
+        there with ``--behind-tls-proxy``, and that statement disables this.
+        """
+        if self.behind_tls_proxy:
+            return False
+        return (self.client_address[0] if self.client_address else "") in LOOPBACK_HOSTS
+
+    def _principal(self) -> Optional[Principal]:
+        """The authenticated caller, or None.
+
+        A loopback caller is a local admin, whether or not principals are configured. That
+        is not a shortcut: someone on this host can already read the principals file, the
+        tenant bundle, the audit log and every profile directory straight off disk.
+        Demanding a bearer token from them protects nothing and would break the dashboard,
+        which is a browser and cannot send one.
+
+        So principals gate *remote* access, which is what they are for. The distinction is
+        recorded in the access log — ``via=loopback`` versus a principal's name — so an
+        operator can always tell how a request was authorised.
+        """
+        if self._is_loopback_client():
+            return LOCAL_ADMIN
+        if not self.principals.configured:
+            return None
         header = self.headers.get("Authorization", "")
         prefix = "Bearer "
         if not header.startswith(prefix):
-            return False
-        return hmac.compare_digest(header[len(prefix) :], self.token)
+            return None
+        return self.principals.authenticate(header[len(prefix) :])
 
     # -- methods --------------------------------------------------------------
 
@@ -104,9 +138,32 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
 
-        if not self._authorized():
-            self._send_json(401, {"error": {"status": 401, "message": "missing or invalid token"}})
+        principal = self._principal()
+        if principal is None:
+            self._send_json(
+                401, {"error": {"status": 401, "message": "missing or invalid token"}}
+            )
             return
+
+        if path.startswith("/platform/") and not principal.may(path[API_PREFIX_LEN:] or "/"):
+            # 403, not 404: the caller is authenticated and the route exists. Pretending
+            # otherwise would make a permissions problem look like a bug and send an
+            # operator debugging the wrong thing.
+            logger.warning(
+                "denied %s -> %s (role=%s)", principal.name, path, principal.role
+            )
+            self._send_json(
+                403,
+                {
+                    "error": {
+                        "status": 403,
+                        "message": f"role {principal.role!r} may not read this route",
+                    }
+                },
+            )
+            return
+
+        logger.info("%s %s %s", principal.name, self.command, path)
 
         if path.startswith("/platform/"):
             query = {key: values[0] for key, values in parse_qs(parsed.query).items()}
@@ -144,23 +201,68 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def build_server(
-    api: ControlAPI, *, host: str = "127.0.0.1", port: int = 8787, token: str = ""
+    api: ControlAPI,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8787,
+    principals: Optional[PrincipalStore] = None,
+    tls_certfile: str = "",
+    tls_keyfile: str = "",
+    behind_tls_proxy: bool = False,
 ) -> ThreadingHTTPServer:
     """Construct the server without starting it. Refuses unsafe binds.
 
-    Raises :class:`~nova.errors.NovaError` when asked to bind a non-loopback interface
-    without a token — the failure has to happen here rather than after the socket is
-    already accepting connections.
-    """
-    if host not in LOOPBACK_HOSTS and not token:
-        raise NovaError(
-            f"refusing to bind {host} without a token: the control API exposes this "
-            "tenant's agents and work. Pass a token, or bind 127.0.0.1 and use an SSH "
-            "tunnel."
-        )
+    Two refusals, both before the socket accepts anything:
 
-    handler = type("_BoundHandler", (_Handler,), {"api": api, "token": token})
-    return ThreadingHTTPServer((host, port), handler)
+    **No anonymous exposure.** A non-loopback bind needs a principals file. Without one
+    every caller would be the local admin, which is correct on loopback and catastrophic on
+    an interface.
+
+    **No cleartext exposure.** A non-loopback bind needs TLS — either terminated here with
+    a certificate, or terminated by a proxy the operator explicitly says is in front. The
+    acknowledgement is required rather than assumed because "there is probably a load
+    balancer" is exactly the assumption that ships a bearer token in cleartext across a
+    VPC.
+    """
+    principals = principals or PrincipalStore()
+
+    if host not in LOOPBACK_HOSTS:
+        if not principals.configured:
+            raise NovaError(
+                f"refusing to bind {host} with no principals file: every caller would be "
+                "treated as a local admin. Create one with `nova token new`, or bind "
+                "127.0.0.1 and use an SSH tunnel"
+            )
+        if not tls_certfile and not behind_tls_proxy:
+            raise NovaError(
+                f"refusing to bind {host} without TLS: bearer tokens and this tenant's "
+                "agents, work and policy would cross the network in cleartext. Pass "
+                "--tls-cert/--tls-key, or --behind-tls-proxy if TLS terminates at a load "
+                "balancer in front of this process"
+            )
+
+    handler = type(
+        "_BoundHandler",
+        (_Handler,),
+        {"api": api, "principals": principals, "behind_tls_proxy": behind_tls_proxy},
+    )
+    server = ThreadingHTTPServer((host, port), handler)
+
+    if tls_certfile:
+        import ssl
+
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        # TLS 1.2 floor: 1.0 and 1.1 are deprecated and a control plane is new enough to
+        # have no legacy client to accommodate.
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        try:
+            context.load_cert_chain(tls_certfile, tls_keyfile or None)
+        except (OSError, ssl.SSLError) as exc:
+            server.server_close()
+            raise NovaError(f"could not load the TLS certificate: {exc}") from exc
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+
+    return server
 
 
 def serve(
@@ -168,14 +270,26 @@ def serve(
     *,
     host: str = "127.0.0.1",
     port: int = 8787,
-    token: str = "",
+    principals: Optional[PrincipalStore] = None,
+    tls_certfile: str = "",
+    tls_keyfile: str = "",
+    behind_tls_proxy: bool = False,
     ready: Optional[callable] = None,
 ) -> None:
     """Serve until interrupted. ``ready`` is called with the bound address once listening."""
-    server = build_server(api, host=host, port=port, token=token)
+    server = build_server(
+        api,
+        host=host,
+        port=port,
+        principals=principals,
+        tls_certfile=tls_certfile,
+        tls_keyfile=tls_keyfile,
+        behind_tls_proxy=behind_tls_proxy,
+    )
     bound_host, bound_port = server.server_address[:2]
     if ready is not None:
-        ready(f"http://{bound_host}:{bound_port}/")
+        scheme = "https" if tls_certfile else "http"
+        ready(f"{scheme}://{bound_host}:{bound_port}/")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -18,6 +18,7 @@ from nova import __version__
 from nova.apply import apply_bundle
 from nova.audit import AuditLog, NullAuditLog
 from nova.errors import NovaError
+from nova.control.auth import PRINCIPALS_FILENAME, ROLES as AUTH_ROLES
 from nova.runtime import available_runtimes, get_runtime
 from nova.spec import load_bundle
 
@@ -134,10 +135,31 @@ def _build_parser() -> argparse.ArgumentParser:
     serve_cmd.add_argument("--host", default="127.0.0.1", help="default: loopback only")
     serve_cmd.add_argument("--port", type=int, default=8787)
     serve_cmd.add_argument(
-        "--token",
-        default="",
-        help="bearer token; required to bind anything other than loopback",
+        "--principals",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="who may call the control plane (default: <home>/control-principals.yaml)",
     )
+    serve_cmd.add_argument("--tls-cert", default="", metavar="FILE", help="TLS certificate")
+    serve_cmd.add_argument("--tls-key", default="", metavar="FILE", help="TLS private key")
+    serve_cmd.add_argument(
+        "--behind-tls-proxy",
+        action="store_true",
+        help="TLS terminates at a proxy in front of this process; required to bind a "
+             "non-loopback interface without --tls-cert",
+    )
+
+    token = sub.add_parser("token", help="manage control-plane access")
+    token_sub = token.add_subparsers(dest="token_command", required=True)
+    token_new = token_sub.add_parser("new", help="mint a token and print the entry to add")
+    token_new.add_argument("name", help="who this token is for, as it will appear in logs")
+    token_new.add_argument(
+        "--role", choices=list(AUTH_ROLES), default="viewer",
+        help="viewer: operational state. admin: also policy, decisions and cost",
+    )
+    token_list = token_sub.add_parser("list", help="who may call the control plane")
+    token_list.add_argument("--principals", type=Path, default=None, metavar="FILE")
 
     return parser
 
@@ -153,6 +175,45 @@ def _report(report, *, verb: str) -> None:
         print(f"  warning:  {warning}")
     if report.dry_run:
         print(f"\nNothing was written. Re-run `nova {verb}` without --dry-run to apply.")
+
+
+def _token(args) -> int:
+    """``nova token ...`` — mint and inspect control-plane credentials.
+
+    The token is printed **once** and never stored: NOVA writes the digest into the
+    principals file and keeps nothing it could later leak. That is the same rule the
+    deployment seam follows for model credentials, applied to NOVA's own front door — and
+    it means a stolen principals file is an inconvenience rather than an incident.
+    """
+    from nova.control.auth import PrincipalStore, hash_token, new_token
+
+    runtime = get_runtime(args.runtime, home=args.home)
+
+    if args.token_command == "list":
+        path = args.principals or (runtime.state_location / PRINCIPALS_FILENAME)
+        store = PrincipalStore.load(path)
+        if not store.configured:
+            print(f"no principals configured at {path}")
+            return 0
+        print(f"{path}")
+        for entry in store.describe():
+            print(f"  {entry['name']:24} {entry['role']}")
+        return 0
+
+    secret = new_token()
+    path = runtime.state_location / PRINCIPALS_FILENAME
+    print(f"token for {args.name} ({args.role}) — shown once, not stored by NOVA:\n")
+    print(f"  {secret}\n")
+    print(f"Add this entry to {path}:\n")
+    print("principals:")
+    print(f"  - name: {args.name}")
+    print(f"    role: {args.role}")
+    print(f"    token_sha256: {hash_token(secret)}")
+    print(
+        "\nCallers send it as:  Authorization: Bearer <token>\n"
+        "Revoke by deleting the entry; no other principal is affected."
+    )
+    return 0
 
 
 def _doctor(args) -> int:
@@ -456,6 +517,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if args.command == "doctor":
             return _doctor(args)
 
+        if args.command == "token":
+            return _token(args)
+
         if args.command == "serve":
             from nova.control import ControlAPI, serve
 
@@ -468,11 +532,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                     runtime.state_location, tenant_id=bundle.tenant_id, actor="nova-control"
                 ),
             )
+            from nova.control.auth import PrincipalStore
+
+            principals_path = args.principals or (
+                runtime.state_location / PRINCIPALS_FILENAME
+            )
+            principals = PrincipalStore.load(principals_path)
+            if principals.configured:
+                who = ", ".join(
+                    f"{entry['name']}({entry['role']})" for entry in principals.describe()
+                )
+                print(f"principals: {who}")
+            else:
+                print(
+                    f"no principals file at {principals_path} — serving loopback only, "
+                    "every local caller is admin. Add one with `nova token new`."
+                )
             serve(
                 api,
                 host=args.host,
                 port=args.port,
-                token=args.token,
+                principals=principals,
+                tls_certfile=args.tls_cert,
+                tls_keyfile=args.tls_key,
+                behind_tls_proxy=args.behind_tls_proxy,
                 ready=lambda url: print(f"{bundle.identity.product_name} control plane: {url}"),
             )
             return 0

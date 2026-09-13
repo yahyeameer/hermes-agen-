@@ -607,39 +607,74 @@ function renderTasks(data) {
   target.appendChild(table(["Task", "Agent", "State", "Failures"], rows));
 }
 
+/* One panel failing must not blank the others. Promise.all rejects on the first failure,
+   so a viewer who is legitimately forbidden the governance routes — or a single endpoint
+   erroring — would previously get an empty page and one banner. Each panel now settles
+   independently: what the caller may see, they see. */
+async function panel(path, render, label) {
+  try {
+    render(await getJSON(path));
+    return true;
+  } catch (error) {
+    const forbidden = /may not read this route/.test(error.message);
+    if (!forbidden) showBanner(`${label}: ${error.message}`, "problem");
+    return forbidden ? "forbidden" : false;
+  }
+}
+
+function renderForbidden(target, count, label) {
+  const node = document.getElementById(target);
+  if (node) {
+    node.replaceChildren(
+      emptyState(
+        "Not available to your role",
+        `${label} needs the admin role. You are signed in with a role that covers ` +
+          "operational state only."
+      )
+    );
+  }
+  const counter = document.getElementById(count);
+  if (counter) counter.textContent = "restricted";
+}
+
 async function boot() {
   try {
-    const identity = await getJSON("/identity");
-    applyIdentity(identity);
+    applyIdentity(await getJSON("/identity"));
   } catch (error) {
     showBanner(`Could not load identity: ${error.message}`, "problem");
   }
 
-  try {
-    const [health, agents, tasks, policy, decisions, budget, knowledge, objectives] =
-      await Promise.all([
-      getJSON("/health"),
-      getJSON("/agents"),
-      getJSON("/tasks?limit=100"),
-      getJSON("/policy"),
-      getJSON("/decisions?limit=50"),
-      getJSON("/budget"),
-      getJSON("/knowledge"),
-      getJSON("/objectives"),
-    ]);
-    renderHealth(health);
-    renderStats(agents, tasks);
-    renderAgents(agents);
-    renderTasks(tasks);
-    renderPolicy(policy);
-    renderObjectives(objectives);
-    renderKnowledge(knowledge);
-    renderDecisions(decisions);
-    renderControls(budget);
-    renderUsage(budget);
-  } catch (error) {
-    showBanner(`Could not reach the control API: ${error.message}`, "problem");
-  }
+  /* Agents and tasks feed the stat row together, so they are fetched as a pair rather
+     than rendered independently. */
+  let agents = null;
+  let tasks = null;
+  await Promise.all([
+    panel("/health", renderHealth, "Health"),
+    getJSON("/agents").then((data) => { agents = data; }).catch(() => {}),
+    getJSON("/tasks?limit=100").then((data) => { tasks = data; }).catch(() => {}),
+  ]);
+  if (agents && tasks) renderStats(agents, tasks);
+  if (agents) renderAgents(agents);
+  if (tasks) renderTasks(tasks);
+
+  await Promise.all([
+    panel("/objectives", renderObjectives, "Objectives"),
+    panel("/knowledge", renderKnowledge, "Knowledge"),
+    panel("/policy", renderPolicy, "Governance").then((state) => {
+      if (state === "forbidden") renderForbidden("policy", "policy-count", "Governance");
+    }),
+    panel("/decisions?limit=50", renderDecisions, "Decisions").then((state) => {
+      if (state === "forbidden") renderForbidden("decisions", "decision-count", "Policy decisions");
+    }),
+    panel("/budget", (data) => { renderControls(data); renderUsage(data); }, "Budget").then(
+      (state) => {
+        if (state === "forbidden") {
+          renderForbidden("controls", "", "Limits");
+          renderForbidden("usage", "usage-note", "Reported usage");
+        }
+      }
+    ),
+  ]);
 }
 
 boot();
