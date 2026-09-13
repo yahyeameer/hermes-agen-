@@ -15,10 +15,13 @@ import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from nova._fields import Doc
 from nova.errors import SpecError
+
+if TYPE_CHECKING:  # pragma: no cover
+    from nova.spec.deployment import ProviderSpec
 
 #: Reasoning depths NOVA accepts. Mapped per runtime by the adapter; a runtime that
 #: cannot express a level is expected to say so rather than silently ignore it.
@@ -27,32 +30,75 @@ REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "max")
 
 @dataclass(frozen=True)
 class ModelSpec:
-    """Which model an agent runs on. Values are resolved from the environment at load."""
+    """Which model an agent runs on, and how to reach it.
+
+    Deployment fields (``endpoint``, ``api_key_env``, ``context_window``, ``region``) are
+    the per-agent half of :class:`nova.spec.deployment.ProviderSpec`. Most agents set none
+    of them and inherit the tenant's; an agent that needs a cheaper model, or a different
+    region, overrides only the field that differs.
+
+    ``api_key_env`` names a variable and never carries a credential — refused at parse time
+    if it looks like one. See :mod:`nova.spec.deployment` for why that refusal is the only
+    moment it is worth anything.
+    """
 
     provider: str = ""
     name: str = ""
     reasoning_effort: Optional[str] = None
+    endpoint: str = ""
+    api_key_env: str = ""
+    context_window: Optional[int] = None
+    region: str = ""
+
+    @property
+    def deployment(self) -> "ProviderSpec":
+        """This agent's overrides, in the shared provider vocabulary."""
+        from nova.spec.deployment import ProviderSpec
+
+        return ProviderSpec(
+            provider=self.provider,
+            model=self.name,
+            endpoint=self.endpoint,
+            api_key_env=self.api_key_env,
+            context_window=self.context_window,
+            region=self.region,
+        )
 
     @classmethod
     def parse(cls, doc: Optional[Doc]) -> "ModelSpec":
         if doc is None:
             return cls()
+        from nova.spec.deployment import check_not_a_secret
+
         spec = cls(
             provider=doc.str_("provider"),
             name=doc.str_("name"),
             reasoning_effort=doc.choice("reasoning_effort", REASONING_EFFORTS),
+            # Unexpanded: a ${VAR} must reach the worker as a reference and resolve in the
+            # worker's environment, not in whoever ran `nova apply`.
+            endpoint=doc.str_("endpoint", expand=False),
+            api_key_env=check_not_a_secret(
+                doc.str_("api_key_env", expand=False),
+                field="model.api_key_env",
+                source=doc.source,
+            ),
+            context_window=doc.int_("context_window", minimum=1),
+            region=doc.str_("region", expand=False),
         )
         doc.reject_unknown()
         return spec
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {}
-        if self.provider:
-            out["provider"] = self.provider
-        if self.name:
-            out["name"] = self.name
-        if self.reasoning_effort:
-            out["reasoning_effort"] = self.reasoning_effort
+        for key, value in (
+            ("provider", self.provider), ("name", self.name),
+            ("reasoning_effort", self.reasoning_effort), ("endpoint", self.endpoint),
+            ("api_key_env", self.api_key_env), ("region", self.region),
+        ):
+            if value:
+                out[key] = value
+        if self.context_window is not None:
+            out["context_window"] = self.context_window
         return out
 
 

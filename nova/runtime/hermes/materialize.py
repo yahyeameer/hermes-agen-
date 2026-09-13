@@ -24,7 +24,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import yaml
 
@@ -33,6 +33,8 @@ from nova.policy import CompiledPolicy, agent_digest
 from nova.runtime.base import MaterializeResult
 from nova.runtime.hermes.paths import HermesPaths
 from nova.knowledge.sources import KnowledgeCatalog
+from nova.runtime.hermes import provider as _provider
+from nova.spec.deployment import ProviderSpec
 from nova.spec import AgentSpec, IdentitySpec
 
 #: Filenames inside a profile that belong to the customer or the runtime. NOVA never
@@ -140,6 +142,18 @@ def atomic_write(path: Path, text: str) -> None:
         raise
 
 
+def _deep_merge(base: Mapping[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
+    """Recursive merge, overlay winning at the leaf. Used only for the operator passthrough."""
+    out = dict(base)
+    for key, value in overlay.items():
+        current = out.get(key)
+        if isinstance(current, Mapping) and isinstance(value, Mapping):
+            out[key] = _deep_merge(current, value)
+        else:
+            out[key] = value
+    return out
+
+
 def plugins_section(*, policy: bool, knowledge: bool) -> dict[str, Any]:
     """The ``plugins`` block enabling the plugins NOVA installed for this agent.
 
@@ -175,6 +189,8 @@ def build_config(
     *,
     policy: bool = False,
     knowledge: bool = False,
+    provider: Optional[ProviderSpec] = None,
+    runtime_config: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """The runtime ``config.yaml`` body for one agent.
 
@@ -192,11 +208,32 @@ def build_config(
     if section:
         config["plugins"] = section
 
-    model: dict[str, Any] = {}
-    if spec.model.name:
-        model["model"] = spec.model.name
-    if spec.model.provider:
-        model["provider"] = spec.model.provider
+    # Operator-owned deployment settings first, so anything NOVA compiles below wins over
+    # them. The passthrough exists for what NOVA does not model; it may not quietly replace
+    # what NOVA does — nova/spec/deployment.py refuses the reserved keys at parse time, and
+    # this ordering is the second half of that guarantee.
+    if runtime_config:
+        config.update(_deep_merge(config, dict(runtime_config)))
+
+    # ``provider`` is the RESOLVED answer — tenant defaults already merged under this
+    # agent's own overrides by ``TenantBundle.provider_for``. Re-applying ``spec.model`` on
+    # top of it would overwrite the routing key with the agent's raw ``provider:`` value,
+    # producing ``provider: bedrock`` beside a ``custom_providers`` entry named something
+    # else — which resolves to nothing and fails as "No LLM provider configured". Only when
+    # no resolved provider is supplied does the spec stand on its own.
+    resolved = provider if provider is not None else spec.model.deployment
+    provider_config, _ = _provider.build_provider_config(resolved)
+    for key, value in provider_config.items():
+        if key == "model" and isinstance(config.get("model"), dict):
+            config["model"] = {**config["model"], **value}
+        else:
+            config[key] = value
+
+    model: dict[str, Any] = dict(config.get("model") or {})
+    if spec.model.reasoning_effort:
+        # Carried on the agent rather than the provider: it is a property of how this agent
+        # thinks, not of where the model is hosted.
+        model.setdefault("reasoning_effort", spec.model.reasoning_effort)
     if model:
         config["model"] = model
 
@@ -429,6 +466,8 @@ def plan_writes(
     identity: Optional[IdentitySpec],
     policy: Optional[CompiledPolicy] = None,
     knowledge: Optional[dict[str, Any]] = None,
+    provider: Optional[ProviderSpec] = None,
+    runtime_config: Optional[Mapping[str, Any]] = None,
 ) -> dict[Path, str]:
     """Every file this materialization would write, as path -> content.
 
@@ -436,7 +475,13 @@ def plan_writes(
     rather than approximating it.
     """
     config_text = yaml.safe_dump(
-        build_config(spec, policy=policy is not None, knowledge=bool(knowledge)),
+        build_config(
+            spec,
+            policy=policy is not None,
+            knowledge=bool(knowledge),
+            provider=provider,
+            runtime_config=runtime_config,
+        ),
         sort_keys=True,
         default_flow_style=False,
     )
@@ -493,6 +538,8 @@ def materialize(
     identity: Optional[IdentitySpec] = None,
     policy: Optional[CompiledPolicy] = None,
     knowledge: Optional[dict[str, Any]] = None,
+    provider: Optional[ProviderSpec] = None,
+    runtime_config: Optional[Mapping[str, Any]] = None,
     dry_run: bool = False,
 ) -> MaterializeResult:
     """Create or update one agent's profile. Idempotent.
@@ -515,7 +562,7 @@ def materialize(
     # The policy is part of what an agent IS, so it belongs in the identity that decides
     # whether a re-apply is a change. A policy edit with an unchanged spec must rewrite.
     digest = _combined_digest(spec, policy, knowledge)
-    writes = plan_writes(spec, paths, identity, policy, knowledge)
+    writes = plan_writes(spec, paths, identity, policy, knowledge, provider, runtime_config)
 
     if existing is not None and existing.digest == digest and not created:
         # Still verify the files are actually present: a deleted SOUL.md with a stale

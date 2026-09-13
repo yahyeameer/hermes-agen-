@@ -119,6 +119,8 @@ def apply_bundle(
             "agents": [spec.id for spec in bundle.agents],
             "policy_declared": bundle.policy is not None,
             "knowledge_sources": [source.id for source in bundle.knowledge.sources],
+            # Variable NAMES only. A credential must never reach an audit record.
+            "required_env": list(bundle.deployment.required_env),
             "warnings": warnings,
         },
     )
@@ -149,9 +151,24 @@ def apply_bundle(
                 identity=bundle.identity,
                 policy=compiled,
                 knowledge=bundle.knowledge,
+                deployment=bundle.deployment,
                 dry_run=dry_run,
             )
         )
+
+    # Readiness is reported, never fixed: NOVA writes the NAME of every credential and
+    # none of the values, so an agent can be perfectly materialized and still unable to
+    # start. Saying so at apply time is the whole difference between finding out now and
+    # finding out when the first task runs.
+    for spec in selected:
+        report_row = runtime.deployment_readiness(spec, bundle.deployment)
+        if not report_row.get("ready", True):
+            missing = ", ".join(report_row.get("missing", []))
+            location = report_row.get("env_file") or "the agent's .env"
+            warnings.append(
+                f"{spec.id}: cannot run yet — {missing} is not set. Add it to {location}; "
+                "NOVA never writes credentials, so that file is yours and survives apply"
+            )
 
     orphans = _orphans(bundle, runtime)
     if orphans:

@@ -114,6 +114,7 @@ edit is the single most useful habit in this repository.
 | Giving one agent a new tool | A **plugin** in `<profile>/plugins/<name>/` with `register(ctx)` + `provides_tools`. A worker runs with its profile as the runtime home, so plugin discovery scopes it to exactly that agent | none |
 | Document extraction (PDF, Office, OpenDocument) | The runtime's own extractors, borrowed through `AgentRuntime.extract_text()` — imported **lazily, inside an adapter** | none |
 | Creating work for an agent | `kanban_db.create_task` — the runtime's own API for its own shared board (`kanban.db`, not the conversation state on `NEVER_WRITE`), called lazily from an adapter. Never raw SQL against that schema | none |
+| Customer model endpoints and credentials | `deployment.yaml` → the adapter's provider translator. Endpoints and the **names** of credential variables in `<profile>/config.yaml`; the values in `<profile>/.env`, which is on `NEVER_WRITE` and owned by the operator | none |
 
 **If you are about to edit core, you have probably missed a seam above. Check first.**
 
@@ -248,5 +249,8 @@ in the patch budget can genuinely conflict.
    seam with the runtime — plugin enablement, hook registration, tool availability — has to
    be proven in a live worker, because each of those failed silently once already
    (`LIVE_RUN.md`).
+9. Writing a credential anywhere NOVA owns — a profile config, an audit record, a log line —
+   or adding a command that takes one. NOVA writes the **name** of a secret and never its
+   value; `<profile>/.env` belongs to the operator and is on `NEVER_WRITE` (`PHASE_6.md`).
 
 If a change you are about to make matches one of these, stop and re-read §3.

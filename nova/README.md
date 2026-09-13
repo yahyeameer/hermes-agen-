@@ -19,6 +19,8 @@ the authoritative boundary definition.
 | `docs/platform/PHASE_4.md` | Knowledge: declared corpora, scoped retrieval, and the trust boundary around it |
 | `docs/platform/PHASE_5.md` | Supervisor: objectives routed under the tenant's delegation policy |
 | `docs/platform/LIVE_RUN.md` | The end-to-end worker run, the four defects it found, and the gap it left |
+| `docs/platform/DEPLOYMENT_CONFIG_AUDIT.md` | How provider config, env and secrets actually reach a worker |
+| `docs/platform/PHASE_6.md` | The deployment seam: endpoints, credential names, and readiness |
 | `docs/platform/BUDGET_ENFORCEMENT_AUDIT.md` | What the runtime exposes for usage and limits, and which of it is enforceable |
 | `docs/platform/KNOWLEDGE_CAPABILITY_AUDIT.md` | What exists for knowledge, retrieval and documents; what to reuse versus build |
 | `docs/platform/CORE_PATCHES.md` | The patch budget — every upstream file touched, and why |
@@ -38,7 +40,7 @@ control/        Control API (read-only) + the dashboard                    [buil
 knowledge/      Declare -> chunk -> index -> search, scoped per agent      [built]
 supervisor/     Objectives routed under the declared delegation policy     [built]
 apply.py        Bundle -> runtime orchestration                            [built]
-cli.py          `validate | plan | apply | status | knowledge | objective` [built]
+cli.py          `validate|plan|apply|status|doctor|knowledge|objective`   [built]
 examples/       Two agents, two corpora, one objective                     [built]
 
 observability/  JSON logs, correlation IDs, CloudWatch                     [planned]
@@ -54,6 +56,7 @@ python -m nova validate nova/examples/acme
 python -m nova plan     nova/examples/acme
 python -m nova apply    nova/examples/acme
 python -m nova status
+python -m nova doctor  nova/examples/acme   # what each agent still needs
 
 python -m nova knowledge ingest nova/examples/acme
 python -m nova knowledge search nova/examples/acme "refund approval" --as-agent customer-support

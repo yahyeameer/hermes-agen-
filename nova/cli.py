@@ -99,6 +99,12 @@ def _build_parser() -> argparse.ArgumentParser:
     knowledge_search.add_argument("--source", action="append", default=[], dest="sources")
     knowledge_search.add_argument("--limit", type=int, default=5)
 
+    doctor = sub.add_parser(
+        "doctor", help="what each agent still needs before it can run"
+    )
+    doctor.add_argument("bundle", type=Path)
+    doctor.add_argument("--json", action="store_true")
+
     objective = sub.add_parser("objective", help="plan, submit and follow business objectives")
     objective_sub = objective.add_subparsers(dest="objective_command", required=True)
 
@@ -147,6 +153,47 @@ def _report(report, *, verb: str) -> None:
         print(f"  warning:  {warning}")
     if report.dry_run:
         print(f"\nNothing was written. Re-run `nova {verb}` without --dry-run to apply.")
+
+
+def _doctor(args) -> int:
+    """``nova doctor`` — deployment readiness, reported and never fixed.
+
+    NOVA writes the name of every credential and none of the values, so "materialized" and
+    "able to run" are different states. Exits non-zero when any agent cannot run, so a
+    deployment pipeline fails here rather than at the first task.
+    """
+    bundle = load_bundle(args.bundle)
+    runtime = get_runtime(args.runtime, home=args.home, tenant_id=bundle.tenant_id)
+    rows = [runtime.deployment_readiness(spec, bundle.deployment) for spec in bundle.agents]
+
+    if args.json:
+        print(json.dumps({"tenant_id": bundle.tenant_id, "agents": rows}, indent=2))
+        return 0 if all(row.get("ready", True) for row in rows) else 1
+
+    print(f"{bundle.tenant_id}: {len(rows)} agent(s)")
+    for spec, row in zip(bundle.agents, rows):
+        resolved = row.get("provider") or {}
+        mark = "ok " if row.get("ready", True) else "NOT READY"
+        print(f"\n  [{mark}] {spec.id}")
+        print(f"           provider: {resolved.get('provider') or '(runtime default)'}"
+              f"   model: {resolved.get('model') or '(runtime default)'}")
+        for name in row.get("required", []):
+            where = row.get("resolved_from", {}).get(name)
+            print(f"           {name}: {where or 'MISSING'}")
+        if not row.get("ready", True):
+            print(f"           -> add the missing name(s) to {row.get('env_file')}")
+        for warning in row.get("warnings", []):
+            print(f"           warning: {warning}")
+
+    unready = [row for row in rows if not row.get("ready", True)]
+    if unready:
+        print(
+            f"\n{len(unready)} agent(s) cannot run yet. NOVA never writes credentials — "
+            "those files are yours and survive every apply."
+        )
+        return 1
+    print("\nevery agent can resolve its credentials")
+    return 0
 
 
 def _objective(args) -> int:
@@ -405,6 +452,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "objective":
             return _objective(args)
+
+        if args.command == "doctor":
+            return _doctor(args)
 
         if args.command == "serve":
             from nova.control import ControlAPI, serve

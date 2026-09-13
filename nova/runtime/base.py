@@ -24,6 +24,7 @@ from nova.errors import RuntimeAdapterError
 from nova.policy import CompiledPolicy, agent_digest
 from nova.knowledge.sources import KnowledgeCatalog
 from nova.spec import AgentSpec, IdentitySpec
+from nova.spec.deployment import DeploymentSpec
 
 
 @dataclass(frozen=True)
@@ -416,6 +417,7 @@ class AgentRuntime(ABC):
         identity: Optional[IdentitySpec] = None,
         policy: Optional[CompiledPolicy] = None,
         knowledge: Optional[KnowledgeCatalog] = None,
+        deployment: Optional[DeploymentSpec] = None,
         dry_run: bool = False,
     ) -> MaterializeResult:
         """Create or update one agent inside the runtime.
@@ -576,6 +578,29 @@ class AgentRuntime(ABC):
         Named in NOVA's terms because every runtime has one; what it contains and how it
         is laid out is the adapter's business and nobody else's.
         """
+
+    def deployment_readiness(
+        self,
+        spec: AgentSpec,
+        deployment: Optional[DeploymentSpec] = None,
+    ) -> dict[str, Any]:
+        """Which credentials this agent still needs, and where they must go.
+
+        On the contract because the answer is runtime-shaped — *where* an operator puts a
+        credential differs per runtime — while the question is not. A platform that could
+        only ask this of one adapter would report a second runtime as permanently ready.
+
+        The default reports nothing required, which is the honest answer for an adapter that
+        does not resolve credentials at all.
+        """
+        return {
+            "agent_id": spec.id,
+            "ready": True,
+            "required": [],
+            "missing": [],
+            "warnings": [],
+            "provider": {},
+        }
 
     @property
     def knowledge_index_path(self) -> Path:

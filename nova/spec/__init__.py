@@ -11,6 +11,7 @@ from nova.spec.agent import (
     ToolsSpec,
 )
 from nova.spec.bundle import TenantBundle, load_bundle
+from nova.spec.deployment import DeploymentSpec, ProviderSpec, load_deployment
 from nova.spec.identity import IdentitySpec, SupportSpec, ThemeSpec
 from nova.spec.objective import ObjectiveSpec, PlanStep, load_objectives
 from nova.spec.organization import OrganizationSpec
@@ -20,6 +21,7 @@ __all__ = [
     "ApprovalSpec",
     "DelegationLimits",
     "DelegationSpec",
+    "DeploymentSpec",
     "IdentitySpec",
     "KnowledgeSpec",
     "LimitsSpec",
@@ -27,10 +29,12 @@ __all__ = [
     "ObjectiveSpec",
     "OrganizationSpec",
     "PlanStep",
+    "ProviderSpec",
     "SupportSpec",
     "TenantBundle",
     "ThemeSpec",
     "ToolsSpec",
     "load_bundle",
+    "load_deployment",
     "load_objectives",
 ]

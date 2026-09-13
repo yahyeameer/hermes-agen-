@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
 import yaml
 
 from nova.audit import AuditLog
 from nova.errors import RuntimeAdapterError
 from nova.knowledge.sources import KnowledgeCatalog
+from nova.spec.deployment import DeploymentSpec
 from nova.runtime.hermes.skin import build_skin, skin_filename
 from nova.runtime.base import (
     AgentRuntime,
@@ -26,6 +27,8 @@ from nova.runtime.base import (
 )
 from nova.runtime.hermes import materialize as _materialize
 from nova.runtime.hermes import submit as _submit
+from nova.runtime.hermes import readiness as _readiness
+from nova.runtime.hermes import provider as _provider
 from nova.runtime.hermes import extract as _extract
 from nova.runtime.hermes import usage as _usage
 from nova.runtime.hermes.limits import LIMIT_FACTS
@@ -109,8 +112,12 @@ class HermesRuntime(AgentRuntime):
         identity: Optional[IdentitySpec] = None,
         policy: Optional[CompiledPolicy] = None,
         knowledge: Optional[KnowledgeCatalog] = None,
+        deployment: Optional[DeploymentSpec] = None,
         dry_run: bool = False,
     ) -> MaterializeResult:
+        deployment = deployment or DeploymentSpec()
+        resolved = deployment.provider.merged_with(spec.model.deployment)
+        runtime_config = deployment.runtime_config
         grant = _materialize.build_knowledge_config(
             spec,
             self.paths,
@@ -124,7 +131,7 @@ class HermesRuntime(AgentRuntime):
             # incident, and a plain record() carries no intent/commit pair.
             result = _materialize.materialize(
                 spec, self.paths, identity=identity, policy=policy, knowledge=grant,
-                dry_run=True,
+                provider=resolved, runtime_config=runtime_config, dry_run=True,
             )
             audit.record(
                 "agent.materialize_preview",
@@ -151,7 +158,7 @@ class HermesRuntime(AgentRuntime):
         ) as outcome:
             result = _materialize.materialize(
                 spec, self.paths, identity=identity, policy=policy, knowledge=grant,
-                dry_run=False,
+                provider=resolved, runtime_config=runtime_config, dry_run=False,
             )
             outcome.update(result.to_detail())
         return result
@@ -188,6 +195,25 @@ class HermesRuntime(AgentRuntime):
             result = _submit.submit(self.paths.home, items, dry_run=False)
             outcome.update(result.to_dict())
         return result
+
+    def deployment_readiness(
+        self,
+        spec: AgentSpec,
+        deployment: Optional[DeploymentSpec] = None,
+    ) -> dict[str, Any]:
+        deployment = deployment or DeploymentSpec()
+        resolved = deployment.provider.merged_with(spec.model.deployment)
+        provider_config, warnings = _provider.build_provider_config(resolved)
+        required = _provider.required_env(resolved, dict(deployment.runtime_config or {}))
+        report = _readiness.check(
+            spec.id, required, profile_dir=self.paths.profile_dir(spec.id)
+        ).to_dict()
+        # Warnings ride along rather than being fetched separately: a caller that had to
+        # import the adapter to ask for them would be encoding which runtime it is talking
+        # to, which is the one thing the contract exists to prevent.
+        report["warnings"] = warnings
+        report["provider"] = resolved.to_dict()
+        return report
 
     @property
     def knowledge_index_path(self) -> Path:

@@ -7,6 +7,7 @@ Layout::
       identity.yaml         optional — white-label surface; defaults apply when absent
       policy.yaml           optional — business actions, permissions, enforcement defaults
       knowledge.yaml        optional — the corpora agents may be granted
+      deployment.yaml       optional — operator-owned: endpoints, credential names
       objectives/*.yaml     optional — repeatable business processes
       agents/*.yaml         one AgentSpec per file
       prompts/*.md          persona files referenced by agents
@@ -28,6 +29,7 @@ import yaml
 
 from nova.errors import SpecError
 from nova.knowledge.sources import KnowledgeCatalog, load_catalog
+from nova.spec.deployment import DeploymentSpec, load_deployment
 from nova.spec.objective import ObjectiveSpec, load_objectives
 from nova.spec.agent import AgentSpec
 from nova.spec.identity import IdentitySpec
@@ -70,6 +72,9 @@ class TenantBundle:
     #: Repeatable business processes. Declared here, submitted on demand — loading a bundle
     #: never puts work on a board.
     objectives: tuple[ObjectiveSpec, ...] = ()
+    #: Operator-owned deployment settings: where models live and which variable holds each
+    #: credential. Never the credential itself.
+    deployment: DeploymentSpec = field(default_factory=DeploymentSpec)
 
     @property
     def tenant_id(self) -> str:
@@ -81,6 +86,15 @@ class TenantBundle:
                 return spec
         known = ", ".join(sorted(spec.id for spec in self.agents)) or "(none)"
         raise SpecError(f"no agent {agent_id!r} in this bundle; known agents: {known}")
+
+    def provider_for(self, agent_id: str):
+        """The provider an agent actually runs on: tenant defaults under its own overrides.
+
+        One definition, because materialization, the readiness report and the control plane
+        must agree — and a second copy of "which endpoint does this agent use" is the kind
+        of disagreement that shows up as an agent nobody can explain.
+        """
+        return self.deployment.provider.merged_with(self.agent(agent_id).model.deployment)
 
     def enabled_agents(self) -> tuple[AgentSpec, ...]:
         return tuple(spec for spec in self.agents if spec.enabled)
@@ -94,6 +108,7 @@ class TenantBundle:
                 "policy": self.policy.to_dict() if self.policy else None,
                 "knowledge": self.knowledge.to_dict(),
                 "objectives": [spec.to_dict() for spec in self.objectives],
+                "deployment": self.deployment.to_dict(),
                 "agents": [spec.to_dict() for spec in sorted(self.agents, key=lambda s: s.id)],
             },
             sort_keys=True,
@@ -110,6 +125,7 @@ class TenantBundle:
             "policy": self.policy.to_dict() if self.policy else None,
             "knowledge": self.knowledge.to_dict(),
             "objectives": [spec.to_dict() for spec in self.objectives],
+            "deployment": self.deployment.to_dict(),
             "agents": [spec.to_dict() for spec in self.agents],
         }
 
@@ -144,6 +160,7 @@ def load_bundle(root: Path | str, *, env: Optional[Mapping[str, str]] = None) ->
 
     knowledge = load_catalog(root, env=env)
     objectives = load_objectives(root, env=env)
+    deployment = load_deployment(root, env=env)
 
     agents = _load_agents(root, env=env)
     _check_cross_references(agents, identity)
@@ -161,6 +178,7 @@ def load_bundle(root: Path | str, *, env: Optional[Mapping[str, str]] = None) ->
         policy=policy,
         knowledge=knowledge,
         objectives=objectives,
+        deployment=deployment,
     )
 
 
