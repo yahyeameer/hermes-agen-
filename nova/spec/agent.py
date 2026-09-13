@@ -146,45 +146,122 @@ class ApprovalSpec:
 
 
 @dataclass(frozen=True)
-class LimitsSpec:
-    """Ceilings on an agent's cost and blast radius.
+class DelegationLimits:
+    """Caps on subagent fan-out.
 
-    Every value is optional; an unset limit means "use the runtime's default" rather
-    than "unlimited", because a runtime default is usually the safer of the two.
+    Every field compiles to a runtime configuration key whose enforcement was verified at
+    its call site; see :mod:`nova.policy.limits`. The runtime's own configuration warns
+    that child concurrency multiplies cost linearly, which is why these are here.
     """
 
-    max_concurrent_tasks: Optional[int] = None
-    max_task_runtime_seconds: Optional[int] = None
-    max_retries: Optional[int] = None
-    max_turns: Optional[int] = None
-    daily_token_budget: Optional[int] = None
+    max_concurrent_children: Optional[int] = None
+    max_depth: Optional[int] = None
+    max_child_turns: Optional[int] = None
+    child_timeout_seconds: Optional[int] = None
+    orchestrator_enabled: Optional[bool] = None
 
     @classmethod
-    def parse(cls, doc: Optional[Doc]) -> "LimitsSpec":
+    def parse(cls, doc: Optional[Doc]) -> "DelegationLimits":
         if doc is None:
             return cls()
         spec = cls(
-            max_concurrent_tasks=doc.int_("max_concurrent_tasks", minimum=0),
-            max_task_runtime_seconds=doc.int_("max_task_runtime_seconds", minimum=1),
-            max_retries=doc.int_("max_retries", minimum=0),
-            max_turns=doc.int_("max_turns", minimum=1),
-            daily_token_budget=doc.int_("daily_token_budget", minimum=1),
+            # Floors mirror the runtime's own clamps, so a value NOVA accepts is a value
+            # the runtime will honour rather than silently raise.
+            max_concurrent_children=doc.int_("max_concurrent_children", minimum=1),
+            max_depth=doc.int_("max_depth", minimum=1),
+            max_child_turns=doc.int_("max_child_turns", minimum=1),
+            child_timeout_seconds=doc.int_("child_timeout_seconds", minimum=0),
+            orchestrator_enabled=(
+                doc.bool_("orchestrator_enabled") if doc.has("orchestrator_enabled") else None
+            ),
         )
         doc.reject_unknown()
+        if spec.child_timeout_seconds is not None and 0 < spec.child_timeout_seconds < 30:
+            raise SpecError(
+                f"child_timeout_seconds must be 0 (no timeout) or at least 30; the runtime "
+                f"floors it at 30 and {spec.child_timeout_seconds} would be silently raised",
+                field="limits.delegation.child_timeout_seconds",
+                source=doc.source,
+            )
         return spec
 
     def to_dict(self) -> dict[str, Any]:
         return {
             key: value
             for key, value in (
+                ("max_concurrent_children", self.max_concurrent_children),
+                ("max_depth", self.max_depth),
+                ("max_child_turns", self.max_child_turns),
+                ("child_timeout_seconds", self.child_timeout_seconds),
+                ("orchestrator_enabled", self.orchestrator_enabled),
+            )
+            if value is not None
+        }
+
+
+@dataclass(frozen=True)
+class LimitsSpec:
+    """Bounds on an agent's blast radius.
+
+    Every value is optional; an unset limit means "use the runtime's default" rather than
+    "unlimited", because a runtime default is usually the safer of the two.
+
+    **There is no token or cost limit here, and that is deliberate.** No plugin can veto a
+    model call in this runtime, so a spend ceiling cannot be enforced. Usage and cost are
+    reported instead — see :mod:`nova.policy.limits` for what each control actually does.
+    """
+
+    max_concurrent_tasks: Optional[int] = None
+    max_task_runtime_seconds: Optional[int] = None
+    max_retries: Optional[int] = None
+    max_turns: Optional[int] = None
+    max_tool_calls_per_run: Optional[int] = None
+    #: Injects a wrap-up request. NOT a limit — nothing terminates if it is ignored.
+    soft_wrapup_after_seconds: Optional[int] = None
+    delegation: "DelegationLimits" = field(default_factory=lambda: DelegationLimits())
+
+    @classmethod
+    def parse(cls, doc: Optional[Doc]) -> "LimitsSpec":
+        if doc is None:
+            return cls()
+        if doc.has("daily_token_budget"):
+            raise SpecError(
+                "daily_token_budget is not supported: no plugin can veto a model call in "
+                "this runtime, so a token ceiling cannot be enforced and NOVA will not "
+                "pretend otherwise. Use max_turns and max_tool_calls_per_run to bound "
+                "spend, and read reported usage to observe it",
+                field="limits.daily_token_budget",
+                source=doc.source,
+            )
+        spec = cls(
+            max_concurrent_tasks=doc.int_("max_concurrent_tasks", minimum=0),
+            max_task_runtime_seconds=doc.int_("max_task_runtime_seconds", minimum=1),
+            max_retries=doc.int_("max_retries", minimum=0),
+            max_turns=doc.int_("max_turns", minimum=1),
+            max_tool_calls_per_run=doc.int_("max_tool_calls_per_run", minimum=1),
+            soft_wrapup_after_seconds=doc.int_("soft_wrapup_after_seconds", minimum=1),
+            delegation=DelegationLimits.parse(doc.child("delegation")),
+        )
+        doc.reject_unknown()
+        return spec
+
+    def to_dict(self) -> dict[str, Any]:
+        out = {
+            key: value
+            for key, value in (
                 ("max_concurrent_tasks", self.max_concurrent_tasks),
                 ("max_task_runtime_seconds", self.max_task_runtime_seconds),
                 ("max_retries", self.max_retries),
                 ("max_turns", self.max_turns),
-                ("daily_token_budget", self.daily_token_budget),
+                ("max_tool_calls_per_run", self.max_tool_calls_per_run),
+                ("soft_wrapup_after_seconds", self.soft_wrapup_after_seconds),
             )
             if value is not None
         }
+        delegation = self.delegation.to_dict()
+        if delegation:
+            out["delegation"] = delegation
+        return out
 
 
 @dataclass(frozen=True)

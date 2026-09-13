@@ -198,6 +198,94 @@ function renderDecisions(data) {
   target.appendChild(table(["Tool", "Agent", "Outcome", "Rule"], rows));
 }
 
+/* Enforcement classes. Only the two that genuinely stop an agent read as affirmative;
+   advisory and recorded are deliberately neutral so nothing looks like a guarantee. */
+const ENFORCEMENT_LABEL = {
+  hard_preemptive: "enforced",
+  hard_boundary: "enforced",
+  soft_advisory: "advisory",
+  recorded_only: "not enforced",
+  observed_only: "observed",
+};
+const ENFORCEMENT_TONE = { hard_preemptive: "good", hard_boundary: "good" };
+
+function renderControls(budget) {
+  const target = document.getElementById("controls");
+  target.replaceChildren();
+
+  const rows = [];
+  for (const group of ["controls", "advisory", "recorded"]) {
+    for (const entry of budget[group] || []) {
+      const what = el("td");
+      what.appendChild(el("div", "name", entry.key));
+      if (entry.summary) what.appendChild(el("div", "sub", entry.summary));
+
+      const kind = el("td");
+      kind.appendChild(
+        pill(ENFORCEMENT_LABEL[entry.enforcement] || entry.enforcement,
+             ENFORCEMENT_TONE[entry.enforcement] || null)
+      );
+
+      rows.push([
+        el("td", "id", entry.display_name || entry.agent_id),
+        what,
+        el("td", "num", entry.value),
+        kind,
+        el("td", "id", entry.compiles_to || "—"),
+      ]);
+    }
+  }
+
+  if (!rows.length) {
+    target.appendChild(emptyState("No limits declared", "Add a limits block to an agent spec."));
+    return;
+  }
+  target.appendChild(table(["Agent", "Limit", "Value", "Kind", "Enforced by"], rows));
+}
+
+function renderUsage(budget) {
+  const target = document.getElementById("usage");
+  target.replaceChildren();
+  document.getElementById("usage-note").textContent = "observation, not a limit";
+
+  const observed = budget.observed || [];
+  const withData = observed.filter((entry) => entry.available);
+
+  /* The caveat is stated before the numbers, not under them: it is the thing most likely
+     to be misread, and a footnote below a total is read last if at all. */
+  const caveat = el("div", "empty");
+  caveat.appendChild(el("strong", null, "These figures are not a spending limit"));
+  caveat.appendChild(document.createTextNode(budget.observed_caveat || ""));
+  target.appendChild(caveat);
+
+  if (!withData.length) {
+    target.appendChild(
+      emptyState(
+        "No usage recorded yet",
+        "Token and cost figures appear once an agent has run. An empty table is the " +
+          "expected state for a fresh deployment."
+      )
+    );
+    return;
+  }
+
+  const rows = [];
+  for (const entry of withData) {
+    for (const model of entry.models || []) {
+      rows.push([
+        el("td", "id", entry.agent_id),
+        el("td", "id", model.model || "—"),
+        el("td", "num", model.api_calls),
+        el("td", "num", (model.total_tokens || 0).toLocaleString()),
+        el("td", "num", `~$${(model.estimated_cost_usd || 0).toFixed(4)}`),
+      ]);
+    }
+  }
+  target.appendChild(
+    table(["Agent", "Model", "Calls", "Tokens (reported)", "Cost (estimated)"], rows)
+  );
+}
+
 function renderStats(agents, tasks) {
   const stats = document.getElementById("stats");
   stats.replaceChildren();
@@ -345,12 +433,13 @@ async function boot() {
   }
 
   try {
-    const [health, agents, tasks, policy, decisions] = await Promise.all([
+    const [health, agents, tasks, policy, decisions, budget] = await Promise.all([
       getJSON("/health"),
       getJSON("/agents"),
       getJSON("/tasks?limit=100"),
       getJSON("/policy"),
       getJSON("/decisions?limit=50"),
+      getJSON("/budget"),
     ]);
     renderHealth(health);
     renderStats(agents, tasks);
@@ -358,6 +447,8 @@ async function boot() {
     renderTasks(tasks);
     renderPolicy(policy);
     renderDecisions(decisions);
+    renderControls(budget);
+    renderUsage(budget);
   } catch (error) {
     showBanner(`Could not reach the control API: ${error.message}`, "problem");
   }

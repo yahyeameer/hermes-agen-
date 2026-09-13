@@ -3,6 +3,7 @@
 from nova.spec.agent import (
     AgentSpec,
     ApprovalSpec,
+    DelegationLimits,
     DelegationSpec,
     KnowledgeSpec,
     LimitsSpec,
@@ -16,6 +17,7 @@ from nova.spec.organization import OrganizationSpec
 __all__ = [
     "AgentSpec",
     "ApprovalSpec",
+    "DelegationLimits",
     "DelegationSpec",
     "IdentitySpec",
     "KnowledgeSpec",

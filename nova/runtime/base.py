@@ -134,6 +134,92 @@ class RuntimeHealth:
 
 
 @dataclass(frozen=True)
+class ModelUsage:
+    """Reported usage for one model."""
+
+    model: str
+    provider: str = ""
+    api_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
+    estimated_cost_usd: float = 0.0
+    actual_cost_usd: float = 0.0
+    cost_status: str = ""
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens + self.reasoning_tokens
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model,
+            "provider": self.provider,
+            "api_calls": self.api_calls,
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_read_tokens": self.cache_read_tokens,
+            "cache_write_tokens": self.cache_write_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "total_tokens": self.total_tokens,
+            "estimated_cost_usd": round(self.estimated_cost_usd, 6),
+            "actual_cost_usd": round(self.actual_cost_usd, 6),
+            "cost_status": self.cost_status,
+        }
+
+
+@dataclass(frozen=True)
+class UsageSummary:
+    """One agent's reported usage, with its own caveats attached.
+
+    ``enforcement`` is fixed at ``observed_only`` and is part of the payload so no
+    consumer can render these numbers as a budget without contradicting the data it was
+    handed.
+    """
+
+    agent_id: str
+    available: bool
+    models: tuple[ModelUsage, ...] = ()
+    detail: str = ""
+    enforcement: str = "observed_only"
+    #: Why these figures must not be treated as a ceiling or an invoice.
+    caveats: tuple[str, ...] = field(
+        default_factory=lambda: (
+            "Not a spending limit: no plugin can veto a model call in this runtime.",
+            "Lagging: usage is written by a coalescing background thread.",
+            "Estimated: reconcile against the provider's billing before charging anyone.",
+        )
+    )
+
+    @property
+    def total_tokens(self) -> int:
+        return sum(usage.total_tokens for usage in self.models)
+
+    @property
+    def estimated_cost_usd(self) -> float:
+        return sum(usage.estimated_cost_usd for usage in self.models)
+
+    @property
+    def api_calls(self) -> int:
+        return sum(usage.api_calls for usage in self.models)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "agent_id": self.agent_id,
+            "available": self.available,
+            "detail": self.detail,
+            "enforcement": self.enforcement,
+            "caveats": list(self.caveats),
+            "api_calls": self.api_calls,
+            "total_tokens": self.total_tokens,
+            "estimated_cost_usd": round(self.estimated_cost_usd, 6),
+            "models": [usage.to_dict() for usage in self.models],
+        }
+
+
+@dataclass(frozen=True)
 class MaterializedAgent:
     """An agent as it currently exists inside a runtime.
 
@@ -263,6 +349,15 @@ class AgentRuntime(ABC):
     def health(self) -> RuntimeHealth:
         """Whether the runtime is present and readable."""
 
+    @abstractmethod
+    def usage(self, agent_id: str) -> UsageSummary:
+        """Reported model usage for one agent.
+
+        **Observation, not control.** An implementation must not present these figures as
+        a budget: this runtime family cannot veto a model call, so a token or cost ceiling
+        is not enforceable. The returned summary carries that caveat in its own payload.
+        """
+
     @property
     @abstractmethod
     def state_location(self) -> Path:
@@ -271,6 +366,15 @@ class AgentRuntime(ABC):
         Named in NOVA's terms because every runtime has one; what it contains and how it
         is laid out is the adapter's business and nobody else's.
         """
+
+    def limit_facts(self) -> tuple:
+        """What each NOVA limit actually does on this runtime.
+
+        Enforcement is a claim about a runtime, not about a limit, so each adapter
+        declares its own. The default is empty: an adapter that says nothing is taken to
+        enforce nothing, which is the safe reading.
+        """
+        return ()
 
     def describe(self) -> dict[str, Any]:
         """Adapter summary for operator tooling and the Control API."""

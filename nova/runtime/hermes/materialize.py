@@ -146,13 +146,37 @@ def build_config(spec: AgentSpec) -> dict[str, Any]:
     if model:
         config["model"] = model
 
+    # -- HARD, PRE-EMPTIVE limits ------------------------------------------
+    # Each key below was verified at the runtime call site that reads it; see
+    # docs/platform/BUDGET_ENFORCEMENT_AUDIT.md and nova/policy/limits.py.
     agent_section: dict[str, Any] = {}
     if spec.limits.max_turns is not None:
+        # cli.py::_init_turn_limits -> conversation_loop.py:1514 loop condition.
         agent_section["max_turns"] = spec.limits.max_turns
+    if spec.limits.soft_wrapup_after_seconds is not None:
+        # SOFT: conversation_loop.py:119 injects a wrap-up message. Nothing terminates.
+        agent_section["run_budget_seconds"] = spec.limits.soft_wrapup_after_seconds
     if spec.model.reasoning_effort:
         agent_section["reasoning_effort"] = spec.model.reasoning_effort
     if agent_section:
         config["agent"] = agent_section
+
+    # tools/delegate_tool_config.py::_load_config reads this block through
+    # load_config_readonly(), which follows HERMES_HOME and therefore the profile.
+    delegation = spec.limits.delegation
+    delegation_section: dict[str, Any] = {}
+    if delegation.max_concurrent_children is not None:
+        delegation_section["max_concurrent_children"] = delegation.max_concurrent_children
+    if delegation.max_depth is not None:
+        delegation_section["max_spawn_depth"] = delegation.max_depth
+    if delegation.max_child_turns is not None:
+        delegation_section["max_iterations"] = delegation.max_child_turns
+    if delegation.child_timeout_seconds is not None:
+        delegation_section["child_timeout_seconds"] = delegation.child_timeout_seconds
+    if delegation.orchestrator_enabled is not None:
+        delegation_section["orchestrator_enabled"] = delegation.orchestrator_enabled
+    if delegation_section:
+        config["delegation"] = delegation_section
 
     # Tool DENIALS compile to the runtime's own unconditional deny list, which is
     # evaluated before any bypass mode. That is the strongest expression available
@@ -191,12 +215,13 @@ def build_config(spec: AgentSpec) -> dict[str, Any]:
         declared["knowledge_sources"] = list(spec.knowledge.sources)
     if spec.delegation.may_assign_to:
         declared["may_assign_to"] = list(spec.delegation.may_assign_to)
+    # RECORDED ONLY: the dispatcher enforces these as task columns, which NOVA cannot set
+    # while it does not create tasks. Preserved so the intent survives to the phase that
+    # can act on it — never presented as enforced.
     if spec.limits.max_task_runtime_seconds is not None:
         declared["max_task_runtime_seconds"] = spec.limits.max_task_runtime_seconds
     if spec.limits.max_retries is not None:
         declared["max_retries"] = spec.limits.max_retries
-    if spec.limits.daily_token_budget is not None:
-        declared["daily_token_budget"] = spec.limits.daily_token_budget
     if declared:
         config["nova"] = declared
 

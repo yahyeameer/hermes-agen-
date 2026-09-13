@@ -35,6 +35,12 @@ POLICY_FILENAME = "nova-policy.json"
 
 _CACHE: Dict[str, Any] = {}
 
+#: Budget-consuming tool calls made by this process. A worker handles one task per
+#: process, so this is a per-run counter; in a long-lived interactive session it is
+#: per-session. Named accordingly in the spec (``max_tool_calls_per_run``) so it is never
+#: mistaken for a per-day or per-tenant budget, which this runtime cannot enforce.
+_CALLS_USED = 0
+
 
 def _policy_path() -> Path:
     """The compiled policy for the agent this worker is running as.
@@ -96,6 +102,7 @@ def _record(policy: Dict[str, Any], decision, tool_name: str) -> None:
             "reason": decision.reason,
             "rule": decision.rule,
             "action": decision.action,
+            "calls_used": _CALLS_USED,
         },
         "error": "",
     }
@@ -117,9 +124,10 @@ def pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None, **
     Unrecognised returns are ignored by the runtime, so returning ``None`` for a permitted
     call is the correct way to stay out of the way.
     """
+    global _CALLS_USED
     try:
         policy = _load_policy()
-        decision = decide(policy, tool_name)
+        decision = decide(policy, tool_name, calls_used=_CALLS_USED)
     except Exception as exc:  # noqa: BLE001 — a policy bug must never permit a call
         return {
             "action": "block",
@@ -128,6 +136,12 @@ def pre_tool_call(tool_name: str = "", args: Optional[Dict[str, Any]] = None, **
                 f"({type(exc).__name__}). Refusing rather than proceeding unchecked."
             ),
         }
+
+    # Count only calls that will actually run, and only those the ceiling applies to.
+    # Baseline calls are exempt (an agent out of budget must still close its task), and a
+    # refused call costs nothing, so neither consumes the budget.
+    if decision.effect in (ALLOW, REQUIRE_APPROVAL) and decision.rule != "baseline":
+        _CALLS_USED += 1
 
     if decision.effect == ALLOW:
         return None

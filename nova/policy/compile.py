@@ -116,6 +116,8 @@ def compile_policy(spec: AgentSpec, policy: PolicySpec) -> CompiledPolicy:
         "approval_actions": {name: approval_actions[name] for name in sorted(approval_actions)},
         "allow": sorted(granted),
         "unlisted_tool": policy.unlisted_tool,
+        # HARD BOUNDARY (nova/policy/limits.py). Absent or zero means no ceiling.
+        "max_tool_calls_per_run": spec.limits.max_tool_calls_per_run or 0,
     }
     return CompiledPolicy(agent_id=spec.id, document=document, warnings=tuple(warnings))
 

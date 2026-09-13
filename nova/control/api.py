@@ -18,6 +18,7 @@ from typing import Any, Mapping, Optional
 from nova import __version__
 from nova.audit import AuditLog
 from nova.policy import agent_digest, compile_policy, decide
+from nova.policy.limits import ENFORCING_CLASSES
 from nova.runtime.base import AgentRuntime
 from nova.spec import TenantBundle
 
@@ -93,6 +94,8 @@ class ControlAPI:
             return self.simulate(query)
         if tail == "/decisions":
             return self.decisions(query)
+        if tail == "/budget":
+            return self.budget()
         return _error(404, f"no such route: {path}")
 
     # -- routes ---------------------------------------------------------------
@@ -354,3 +357,73 @@ class ControlAPI:
         for row in rows:
             counts[row["effect"]] = counts.get(row["effect"], 0) + 1
         return Response(200, {"decisions": rows[:limit], "counts": counts, "total": len(rows)})
+
+    # -- budget ---------------------------------------------------------------
+
+    def budget(self) -> Response:
+        """Limits and reported usage, with the two kept structurally apart.
+
+        ``controls`` are things that stop an agent. ``observed`` are measurements that do
+        not. They are separate keys rather than one list with a flag, because a flag is
+        easy to drop in a UI and a missing key is not — and presenting a measurement as a
+        ceiling is the specific failure this route is shaped to prevent.
+        """
+        identity = self.bundle.identity
+        # Enforcement is the runtime's claim, not the platform's assumption.
+        facts = {fact.key: fact for fact in self.runtime.limit_facts()}
+
+        controls: list[dict[str, Any]] = []
+        advisory: list[dict[str, Any]] = []
+        recorded: list[dict[str, Any]] = []
+
+        for spec in self.bundle.agents:
+            limits = spec.limits.to_dict()
+            display = identity.display_name_for(spec.id, spec.name)
+
+            def _row(key: str, value: Any) -> dict[str, Any]:
+                fact = facts.get(key)
+                return {
+                    "agent_id": spec.id,
+                    "display_name": display,
+                    "key": key,
+                    "value": value,
+                    "enforcement": fact.enforcement if fact else "observed_only",
+                    "summary": fact.summary if fact else "",
+                    "compiles_to": fact.compiles_to if fact else "",
+                }
+
+            for key, value in limits.items():
+                if key == "delegation":
+                    for sub_key, sub_value in value.items():
+                        row = _row(f"delegation.{sub_key}", sub_value)
+                        (controls if row["enforcement"] in ENFORCING_CLASSES else recorded).append(row)
+                    continue
+                row = _row(key, value)
+                if row["enforcement"] in ENFORCING_CLASSES:
+                    controls.append(row)
+                elif row["enforcement"] == "soft_advisory":
+                    advisory.append(row)
+                else:
+                    recorded.append(row)
+
+        observed = [self.runtime.usage(spec.id).to_dict() for spec in self.bundle.agents]
+
+        return Response(
+            200,
+            {
+                # Things that actually stop an agent.
+                "controls": controls,
+                # Asks the agent to finish. Not a limit.
+                "advisory": advisory,
+                # Carried to the runtime but not enforced by anything NOVA controls.
+                "recorded": recorded,
+                # Measurements. Never a ceiling.
+                "observed": observed,
+                "observed_caveat": (
+                    "Reported usage is observation, not a limit. No plugin can veto a model "
+                    "call in this runtime, figures lag a background writer, and costs are "
+                    "the runtime's estimate rather than an invoice."
+                ),
+                "enforcement_classes": [fact.to_dict() for fact in self.runtime.limit_facts()],
+            },
+        )

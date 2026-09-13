@@ -120,6 +120,20 @@ them at execution time.
 Enforcement tests load the plugin **by file path with NOVA off the import path**. Do not
 "simplify" them into importing `nova` — that stops testing what actually ships.
 
+## Never label a measurement as a limit
+
+NOVA cannot stop a model call: the runtime's LLM-boundary hooks discard their return
+values. There is therefore **no token or cost ceiling**, and none may be added.
+
+Every control carries an enforcement class as data. Only `hard_preemptive` and
+`hard_boundary` stop an agent; `soft_advisory`, `recorded_only` and `observed_only` do not
+and must never be described as caps, ceilings or limits in any surface.
+
+A control may not claim an enforcing class without a `verified_at` call site you have read
+yourself. Enforcement is a claim about a *runtime*, so the register lives with the adapter,
+not in `nova/policy/`. Tests reject an unbacked claim and reject any emitted runtime config
+key that is not in the register.
+
 ## Tests
 
 Platform tests live under `tests/platform/`. Do not modify existing upstream tests — 3,991 files
@@ -135,4 +149,5 @@ sign the change belongs in `nova/`.
 - [ ] Platform tests pass (`python -m pytest tests/platform/`), and so does the upstream suite.
 - [ ] Any change to model-visible state goes through `AuditLog.model_visible_change()`.
 - [ ] Any new policy rule fails closed, and `decide.py` still imports only the stdlib.
+- [ ] Any new limit is registered with a verified call site, and classified honestly.
 - [ ] No new dependency beyond the standard library and PyYAML.

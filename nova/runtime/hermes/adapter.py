@@ -18,8 +18,11 @@ from nova.runtime.base import (
     RuntimeCapabilities,
     RuntimeHealth,
     TaskView,
+    UsageSummary,
 )
 from nova.runtime.hermes import materialize as _materialize
+from nova.runtime.hermes import usage as _usage
+from nova.runtime.hermes.limits import LIMIT_FACTS
 from nova.runtime.hermes import work as _work
 from nova.runtime.hermes.paths import HermesPaths
 from nova.policy import CompiledPolicy
@@ -75,6 +78,9 @@ class HermesRuntime(AgentRuntime):
     @property
     def state_location(self) -> Path:
         return self.paths.home
+
+    def limit_facts(self) -> tuple:
+        return LIMIT_FACTS
 
     # -- agents ---------------------------------------------------------------
 
@@ -221,6 +227,10 @@ class HermesRuntime(AgentRuntime):
             work_store_present=present,
             agent_count=len(self.list_agents()),
         )
+
+    def usage(self, agent_id: str) -> UsageSummary:
+        """Reported usage for one agent. Observation only — see the returned caveats."""
+        return _usage.read_usage(self.paths.profile_dir(agent_id), agent_id)
 
     # -- identity -------------------------------------------------------------
 

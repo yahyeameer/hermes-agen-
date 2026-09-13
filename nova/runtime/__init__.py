@@ -12,8 +12,10 @@ from nova.runtime.base import (
     MaterializedAgent,
     MaterializeResult,
     RuntimeCapabilities,
+    ModelUsage,
     RuntimeHealth,
     TaskView,
+    UsageSummary,
 )
 from nova.runtime.registry import available_runtimes, get_runtime, register_runtime
 
@@ -22,9 +24,11 @@ __all__ = [
     "AgentRuntime",
     "MaterializedAgent",
     "MaterializeResult",
+    "ModelUsage",
     "RuntimeCapabilities",
     "RuntimeHealth",
     "TaskView",
+    "UsageSummary",
     "available_runtimes",
     "get_runtime",
     "register_runtime",

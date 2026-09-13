@@ -15,6 +15,7 @@ the authoritative boundary definition.
 | `docs/platform/IMPLEMENTATION_PLAN.md` | Extension points, module layout, identity layer, dashboard/runtime communication, AWS boundary, tenant config, Phase 1 |
 | `docs/platform/PHASE_1.md` | What Phase 1 built, its known limitations, and its extension points |
 | `docs/platform/PHASE_2.md` | Policy and governance: how enforcement works, and what it cannot yet express |
+| `docs/platform/PHASE_3.md` | Budget controls: what is enforced, what is only observed, and why |
 | `docs/platform/BUDGET_ENFORCEMENT_AUDIT.md` | What the runtime exposes for usage and limits, and which of it is enforceable |
 | `docs/platform/CORE_PATCHES.md` | The patch budget — every upstream file touched, and why |
 | `docs/platform/HERMES_PLATFORM_AUDIT.md` | Phase 0 assessment of the existing runtime |
@@ -28,7 +29,7 @@ Directories appear as their phase lands. Phase 1 built the first five.
 spec/           AgentSpec, IdentitySpec, OrganizationSpec, TenantBundle    [built]
 runtime/        AgentRuntime contract, registry, and the Hermes adapter    [built]
 audit/          Append-only log enforcing "model-visible means logged"     [built]
-policy/         Declaration, compilation and the decision function         [built]
+policy/         Declaration, compilation, decisions and limit vocabulary   [built]
 control/        Control API (read-only) + the dashboard                    [built]
 apply.py        Bundle -> runtime orchestration                            [built]
 cli.py          `python -m nova validate | plan | apply | status | serve`  [built]
@@ -37,7 +38,6 @@ examples/       A complete two-agent tenant bundle                         [buil
 supervisor/     Decompose -> route -> task board -> collect                [planned]
 knowledge/      Ingest -> extract -> chunk -> index -> retrieve            [planned]
 observability/  JSON logs, correlation IDs, CloudWatch                     [planned]
-budget/         Token and cost ceilings                                    [planned]
 ```
 
 Dependencies are the standard library and PyYAML — nothing else. The layer imports and

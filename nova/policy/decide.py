@@ -12,6 +12,11 @@ as a plain dictionary rather than a NOVA type.
 the worker baseline: a customer who writes ``deny: [terminal]`` means it, and if that
 breaks a worker the compiler warns at build time rather than the runtime overriding the
 customer at execution time.
+
+The tool-call ceiling sits *after* the baseline check, so an agent that has exhausted its
+budget can still close its own task. A ceiling that silenced task reporting would produce
+work that runs and never completes — the same failure that kept positive tool scoping out
+of Phase 1.
 """
 
 from __future__ import annotations
@@ -57,8 +62,14 @@ class Decision:
         }
 
 
-def decide(policy: Optional[Mapping[str, Any]], tool: str) -> Decision:
+def decide(
+    policy: Optional[Mapping[str, Any]], tool: str, *, calls_used: int = 0
+) -> Decision:
     """Resolve one tool call against a compiled policy document.
+
+    ``calls_used`` is how many budget-consuming calls this run has already made. The
+    counter lives with the caller so this function stays pure and testable; the
+    enforcement point owns the count.
 
     A missing or unreadable policy is not an implicit allow-all: an agent materialized
     without a policy has no restrictions to apply, which is different from an agent whose
@@ -99,6 +110,19 @@ def decide(policy: Optional[Mapping[str, Any]], tool: str) -> Decision:
             f"{tool} is part of the baseline every agent needs to report its own work",
             tool=tool,
             rule="baseline",
+        )
+
+    # HARD BOUNDARY: the per-run tool-call ceiling. Checked after the baseline so an
+    # agent out of budget can still report its outcome, and before approval so an
+    # exhausted agent does not queue work for a human it can no longer perform.
+    ceiling = policy.get("max_tool_calls_per_run")
+    if isinstance(ceiling, int) and ceiling > 0 and calls_used >= ceiling:
+        return Decision(
+            DENY,
+            f"this run has already made {calls_used} tool calls, reaching its ceiling of "
+            f"{ceiling}; only task-reporting tools remain available",
+            tool=tool,
+            rule="tool-call-ceiling",
         )
 
     approval_actions = policy.get("approval_actions") or {}
