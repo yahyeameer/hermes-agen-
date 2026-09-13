@@ -93,22 +93,33 @@ LIMIT_FACTS: tuple[LimitFact, ...] = (
         compiles_to="agent.run_budget_seconds",
         verified_at="agent/conversation_loop.py:119 _maybe_inject_run_budget_wrapup",
     ),
+    # Both of these were RECORDED_ONLY on the grounds that NOVA "does not create tasks".
+    # Phase 5 made it create them, so the grounds stopped being true and the classification
+    # understated what NOVA enforces. The error was in the safe direction and was still an
+    # error: /budget renders these words to customers.
+    #
+    # The qualification is real and stays: they apply to work NOVA submits. A task a human
+    # creates with `hermes kanban create` carries whatever that command was given.
     LimitFact(
         key="max_task_runtime_seconds",
-        enforcement=RECORDED_ONLY,
+        enforcement=HARD_PREEMPTIVE,
         summary=(
-            "The dispatcher kills workers past a per-task runtime cap, but that cap is a "
-            "task column NOVA cannot set while it does not create tasks."
+            "On work NOVA submits: the dispatcher SIGTERMs, waits, then SIGKILLs a worker "
+            "past this cap and re-queues the task. Applied from the agent's spec, or from "
+            "an objective step when that states a narrower one."
         ),
-        compiles_to="(tasks.max_runtime_seconds, not settable by NOVA)",
-        verified_at="hermes_cli/kanban_db_dispatch.py:418",
+        compiles_to="tasks.max_runtime_seconds (on submitted work)",
+        verified_at="hermes_cli/kanban_db_dispatch.py:enforce_max_runtime",
     ),
     LimitFact(
         key="max_retries",
-        enforcement=RECORDED_ONLY,
-        summary="Per-task retry cap; a task column NOVA cannot set today.",
-        compiles_to="(tasks.max_retries, not settable by NOVA)",
-        verified_at="hermes_cli/kanban_db.py tasks schema",
+        enforcement=HARD_PREEMPTIVE,
+        summary=(
+            "On work NOVA submits: the consecutive-failure breaker trips on the Nth "
+            "failure and blocks the task rather than respawning forever."
+        ),
+        compiles_to="tasks.max_retries (on submitted work)",
+        verified_at="hermes_cli/kanban_db.py DEFAULT_FAILURE_LIMIT / tasks.max_retries",
     ),
     LimitFact(
         key="tokens",

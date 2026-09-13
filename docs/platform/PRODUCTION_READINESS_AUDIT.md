@@ -22,7 +22,7 @@ Severity is about *deploying to a paying customer*, not about code quality:
 | 3 | ~~No identity, users or RBAC~~ (OIDC still future) | Auth | **FIXED** |
 | 4 | ~~Tenant collision is silent~~ | Isolation | **FIXED** |
 | 5 | No AWS deployment artifacts of any kind | AWS | **Blocking** |
-| 6 | `credential_isolation=True` overclaims | Enforcement | **Blocking** |
+| 6 | ~~`credential_isolation=True` overclaims~~ | Enforcement | **FIXED** |
 | 7 | ~~Control plane returns every task regardless of tenant~~ | Isolation | **FIXED** |
 | 8 | Audit log: no rotation, no retention, unbounded growth | Observability | Hardening |
 | 9 | Audit log is writable by the process it audits | Security | Hardening |
@@ -30,8 +30,8 @@ Severity is about *deploying to a paying customer*, not about code quality:
 | 11 | Interrupted apply warns and never reconciles | Failure recovery | Hardening |
 | 12 | `PROVENANCE_VERSION` written but never checked | Upgrades | Hardening |
 | 13 | No runtime-version compatibility check | Upgrades | Hardening |
-| 14 | Agent-level `max_task_runtime_seconds` ignored for submitted work | Enforcement | Hardening |
-| 15 | Two limit classifications are stale (understate what is enforced) | Enforcement | Hardening |
+| 14 | ~~Agent-level `max_task_runtime_seconds` ignored~~ | Enforcement | **FIXED** |
+| 15 | ~~Two limit classifications are stale~~ | Enforcement | **FIXED** |
 | 16 | No backup or restore story | Failure recovery | Hardening |
 | 17 | Control API is read-only — no write path | Future |
 | 18 | No multi-tenancy | Future |
@@ -149,7 +149,16 @@ exists as code**.
 "Deploy NOVA to a customer AWS account" currently means a human following prose. The IAM
 design is sound and unimplemented; that gap is the single largest piece of work remaining.
 
-### 6. `credential_isolation=True` overclaims
+### 6. `credential_isolation=True` overclaims — **FIXED**
+
+> Corrected rather than removed: the flag does mean something true — two agents given
+> different keys get different keys — and the contract now states the boundary it does
+> *not* cover, with the empirical evidence. The actionable half is that
+> `deployment_readiness` reports `host_wide`: which credentials resolved from the host
+> environment and are therefore shared by every agent. `nova doctor` prints it on a
+> multi-agent host, so an operator sees the isolation they actually have rather than
+> the boolean they were promised.
+
 
 `HERMES_CAPABILITIES` asserts `credential_isolation=True`. Verified: a dispatcher-spawned
 worker has `is_multiplex_active() == False` (it is set only by `gateway/run.py` and
@@ -241,7 +250,12 @@ customer's box, not at `nova apply`.
 
 The manifest mechanism the runtime offers plugins (`requires_hermes`) is the obvious model.
 
-### 14. An agent's declared task-runtime limit is ignored
+### 14. An agent's declared task-runtime limit is ignored — **FIXED**
+
+> Closed with 15, and necessarily before it: reclassifying the limit as enforcing
+> while NOVA still dropped it would have been the exact sin the audit was looking for.
+> A step with no cap now inherits its assignee's; a step that states one overrides it.
+
 
 `AgentSpec.limits.max_task_runtime_seconds` is compiled into the profile config under `nova:`
 where the runtime ignores it, and **is not applied to work NOVA submits** — `submit.py` reads
@@ -251,7 +265,13 @@ This is worth more than it looks, because the dispatcher genuinely enforces the 
 (`kanban_db_dispatch.py::enforce_max_runtime` — SIGTERM, grace, SIGKILL). So NOVA has a
 declared limit it could make `hard_preemptive` today and instead silently drops.
 
-### 15. Two limit classifications are stale
+### 15. Two limit classifications are stale — **FIXED**
+
+> `max_task_runtime_seconds` and `max_retries` are now `hard_preemptive`, scoped to
+> work NOVA submits — the qualification is real and survives, because a task a human
+> creates carries whatever that command was given. A test now asserts that every
+> enforcing classification names a call site.
+
 
 `nova/runtime/hermes/limits.py` still classifies `max_task_runtime_seconds` and `max_retries`
 as `recorded_only`, annotated "not settable by NOVA". Phase 5 made them settable —

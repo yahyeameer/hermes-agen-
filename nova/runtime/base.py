@@ -45,7 +45,19 @@ class RuntimeCapabilities:
     worktree_isolation: bool = False
     #: Each agent runs in its own OS process.
     process_isolation: bool = False
-    #: Each agent has its own credential scope.
+    #: Each agent resolves credentials from its own per-agent store, so two agents given
+    #: different keys get different keys.
+    #:
+    #: **It does not mean an agent cannot see another's credentials.** A worker inherits its
+    #: parent's process environment, and in a dispatcher-spawned worker the runtime's
+    #: multiplex guard is inactive, so a credential exported into the host environment is
+    #: readable by every agent on that host. Verified: a worker reads a variable set only in
+    #: the parent.
+    #:
+    #: Isolation therefore holds exactly when credentials live only in the per-agent store
+    #: and never in the host environment. That is a deployment property, not a runtime
+    #: guarantee, which is why :meth:`AgentRuntime.deployment_readiness` reports where each
+    #: credential actually resolved from rather than only whether it resolved.
     credential_isolation: bool = False
     #: Per-agent tool restriction is enforced by the runtime.
     tool_scoping: bool = False

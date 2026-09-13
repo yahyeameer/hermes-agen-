@@ -41,6 +41,9 @@ class Readiness:
     env_file: Optional[Path] = None
     #: Where each satisfied variable was found, for an operator debugging the wrong value.
     resolved_from: Mapping[str, str] = field(default_factory=dict)
+    #: Variables resolved from the host environment rather than this agent's own file, and
+    #: therefore shared with every other agent on the host.
+    host_wide: tuple[str, ...] = ()
 
     @property
     def ready(self) -> bool:
@@ -54,6 +57,7 @@ class Readiness:
             "missing": list(self.missing),
             "env_file": str(self.env_file) if self.env_file else "",
             "resolved_from": dict(self.resolved_from),
+            "host_wide": list(self.host_wide),
         }
 
     def explain(self) -> str:
@@ -94,12 +98,20 @@ def check(
         else:
             missing.append(name)
 
+    # A host-wide value is not per-agent. Every agent on this machine resolves the same
+    # credential, because a worker inherits the dispatcher's environment and the runtime's
+    # multiplex guard is inactive in a spawned worker. Worth saying out loud on a host with
+    # more than one agent: it is the difference between the isolation NOVA claims and the
+    # isolation this deployment actually has.
+    shared = sorted(name for name, where in resolved.items() if where == "process environment")
+
     return Readiness(
         agent_id=agent_id,
         required=names,
         missing=tuple(missing),
         env_file=env_file,
         resolved_from=resolved,
+        host_wide=tuple(shared),
     )
 
 

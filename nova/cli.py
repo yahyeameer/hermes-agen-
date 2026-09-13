@@ -243,6 +243,14 @@ def _doctor(args) -> int:
             print(f"           {name}: {where or 'MISSING'}")
         if not row.get("ready", True):
             print(f"           -> add the missing name(s) to {row.get('env_file')}")
+        shared = row.get("host_wide") or []
+        if shared and len(rows) > 1:
+            # Only worth saying on a multi-agent host: with one agent there is nothing to
+            # be isolated from, and a warning that is always true is one nobody reads.
+            print(
+                f"           note: {', '.join(shared)} resolves from the host environment, "
+                "so every agent here shares it"
+            )
         for warning in row.get("warnings", []):
             print(f"           warning: {warning}")
 

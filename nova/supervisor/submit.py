@@ -130,7 +130,7 @@ def submit_objective(
     # ``submit_work`` already raises, and two definitions of one refusal drift apart. A dry
     # run still goes through, because planning and routing are useful on a runtime that
     # cannot yet run the plan — that is what the warning above is for.
-    items = build_work_items(objective, tenant_id=tenant_id)
+    items = build_work_items(objective, agents, tenant_id=tenant_id)
     result = runtime.submit_work(
         items, audit=audit, correlation_id=correlation_id, dry_run=dry_run
     )
@@ -146,23 +146,55 @@ def submit_objective(
     )
 
 
-def build_work_items(objective: ObjectiveSpec, *, tenant_id: str = "") -> tuple[WorkItem, ...]:
-    """The objective's steps as runtime-agnostic work items, in dependency order."""
-    return tuple(
-        WorkItem(
-            key=work_key(objective.id, step.id),
-            title=step.title,
-            assignee=step.assignee,
-            body=_body(objective, step),
-            depends_on=tuple(work_key(objective.id, parent) for parent in step.depends_on),
-            priority=step.priority,
-            max_runtime_seconds=step.max_runtime_seconds,
-            max_retries=step.max_retries,
-            decompose=step.decompose,
-            tenant_id=tenant_id,
+def build_work_items(
+    objective: ObjectiveSpec,
+    agents: Sequence[AgentSpec] = (),
+    *,
+    tenant_id: str = "",
+) -> tuple[WorkItem, ...]:
+    """The objective's steps as runtime-agnostic work items, in dependency order.
+
+    A step that does not state a runtime cap or a retry limit inherits its **assignee's**
+    declared limits. That inheritance is the difference between a control and a decoration:
+    the dispatcher genuinely enforces a per-task runtime cap — SIGTERM, grace, SIGKILL at
+    ``kanban_db_dispatch.py::enforce_max_runtime`` — so an agent whose spec says
+    ``max_task_runtime_seconds: 900`` should get 900 seconds on every task NOVA creates for
+    it, not only on the steps whose author happened to restate the number.
+
+    Before this, the agent-level limit was compiled into the profile under the ``nova:`` key
+    the runtime ignores, and dropped everywhere else. A limit that is declared, enforceable
+    and never applied is exactly the shape of control this platform exists to eliminate.
+    """
+    by_id = {spec.id: spec for spec in agents}
+
+    def limits_for(step: PlanStep) -> tuple[Optional[int], Optional[int]]:
+        spec = by_id.get(step.assignee)
+        agent_runtime = spec.limits.max_task_runtime_seconds if spec else None
+        agent_retries = spec.limits.max_retries if spec else None
+        # The step wins: it is the narrower statement, made by whoever wrote this plan.
+        return (
+            step.max_runtime_seconds if step.max_runtime_seconds is not None else agent_runtime,
+            step.max_retries if step.max_retries is not None else agent_retries,
         )
-        for step in plan_order(objective)
-    )
+
+    items: list[WorkItem] = []
+    for step in plan_order(objective):
+        runtime_cap, retry_cap = limits_for(step)
+        items.append(
+            WorkItem(
+                key=work_key(objective.id, step.id),
+                title=step.title,
+                assignee=step.assignee,
+                body=_body(objective, step),
+                depends_on=tuple(work_key(objective.id, p) for p in step.depends_on),
+                priority=step.priority,
+                max_runtime_seconds=runtime_cap,
+                max_retries=retry_cap,
+                decompose=step.decompose,
+                tenant_id=tenant_id,
+            )
+        )
+    return tuple(items)
 
 
 def _body(objective: ObjectiveSpec, step: PlanStep) -> str:
