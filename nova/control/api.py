@@ -99,6 +99,8 @@ class ControlAPI:
             return self.budget()
         if tail == "/knowledge":
             return self.knowledge()
+        if tail == "/objectives":
+            return self.objectives()
         return _error(404, f"no such route: {path}")
 
     # -- routes ---------------------------------------------------------------
@@ -204,6 +206,67 @@ class ControlAPI:
                 "counts": counts,
                 "needs_attention": sum(1 for view in views if view.needs_attention),
                 "filtered_by_agent": agent_id,
+            },
+        )
+
+    def objectives(self) -> Response:
+        """Declared objectives: how each routes, and where each has got to.
+
+        Routing and progress together, because separately neither answers the question an
+        operator has. "Blocked" is not useful without knowing whether it is blocked on a
+        failing step or on a delegation the tenant never authorised — those need opposite
+        responses, and only one of them is anyone's fault.
+        """
+        from nova.supervisor import collect, route_objective
+
+        if not self.bundle.objectives:
+            return Response(
+                200,
+                {
+                    "declared": False,
+                    "work_submission": self.runtime.capabilities.work_submission,
+                    "objectives": [],
+                    "detail": "no objectives/ in this tenant bundle",
+                },
+            )
+
+        # One read of the board for every objective rather than one per objective.
+        tasks = self.runtime.list_tasks(limit=1000)
+
+        rows: list[dict[str, Any]] = []
+        for spec in self.bundle.objectives:
+            decision = route_objective(spec, self.bundle.agents)
+            report = collect(spec, self.runtime, tasks=tasks)
+            rows.append(
+                {
+                    "id": spec.id,
+                    "title": spec.title,
+                    "owner": spec.owner,
+                    "owner_display_name": self.bundle.identity.display_name_for(
+                        spec.owner, spec.owner
+                    ),
+                    "description": spec.description,
+                    "acceptance": spec.acceptance,
+                    "enabled": spec.enabled,
+                    "routing_allowed": decision.allowed,
+                    "refusals": [step.to_dict() for step in decision.refusals],
+                    "ungoverned_steps": list(decision.ungoverned_steps),
+                    "warnings": list(decision.warnings) + list(report.warnings),
+                    **report.to_dict(),
+                }
+            )
+
+        return Response(
+            200,
+            {
+                "declared": True,
+                "work_submission": self.runtime.capabilities.work_submission,
+                "detail": (
+                    ""
+                    if self.runtime.capabilities.work_submission
+                    else f"runtime {self.runtime.name!r} cannot accept submitted work"
+                ),
+                "objectives": rows,
             },
         )
 

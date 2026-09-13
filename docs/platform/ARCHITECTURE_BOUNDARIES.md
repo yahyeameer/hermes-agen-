@@ -113,6 +113,7 @@ edit is the single most useful habit in this repository.
 | Tracing | `plugins/observability/` | none |
 | Giving one agent a new tool | A **plugin** in `<profile>/plugins/<name>/` with `register(ctx)` + `provides_tools`. A worker runs with its profile as the runtime home, so plugin discovery scopes it to exactly that agent | none |
 | Document extraction (PDF, Office, OpenDocument) | The runtime's own extractors, borrowed through `AgentRuntime.extract_text()` — imported **lazily, inside an adapter** | none |
+| Creating work for an agent | `kanban_db.create_task` — the runtime's own API for its own shared board (`kanban.db`, not the conversation state on `NEVER_WRITE`), called lazily from an adapter. Never raw SQL against that schema | none |
 
 **If you are about to edit core, you have probably missed a seam above. Check first.**
 
@@ -240,5 +241,7 @@ in the patch budget can genuinely conflict.
 5. A find-and-replace that catches `Hermes-4-405B`.
 6. Letting retrieved customer documents into the system prompt, or scoping a knowledge
    search by telling the model which corpora it may read rather than filtering in SQL.
+7. Writing a second decomposer, scheduler or task store because the runtime's was not
+   shaped exactly like NOVA's model of one — or writing `kanban.db` with raw SQL.
 
 If a change you are about to make matches one of these, stop and re-read §3.

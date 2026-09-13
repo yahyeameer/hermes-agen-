@@ -43,6 +43,9 @@ MODEL_VISIBLE_KINDS: frozenset[str] = frozenset(
         # question "why did the agent say that?" is unanswerable without them.
         "knowledge.indexed",
         "knowledge.granted",
+        # A work item's title and body are read by a worker as its instructions. Placing
+        # one on the board is therefore model-visible in the most direct sense there is.
+        "work.submitted",
     }
 )
 

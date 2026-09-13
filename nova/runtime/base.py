@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from nova.audit import AuditLog
+from nova.errors import RuntimeAdapterError
 from nova.policy import CompiledPolicy, agent_digest
 from nova.knowledge.sources import KnowledgeCatalog
 from nova.spec import AgentSpec, IdentitySpec
@@ -54,6 +55,9 @@ class RuntimeCapabilities:
     #: through :meth:`AgentRuntime.extract_text`. Ingestion still works without it — it
     #: just skips what it cannot read, and says which files it skipped and why.
     document_extraction: bool = False
+    #: NOVA can place work on the runtime's own board, with dependencies between items.
+    #: False means an objective can be planned and routed but never submitted.
+    work_submission: bool = False
     #: Per-agent tool policy is enforced inside the runtime, including escalation of
     #: business actions to a human. False means a declared policy would be inert.
     policy_enforcement: bool = False
@@ -249,6 +253,99 @@ class ExtractedDocument:
 
 
 @dataclass(frozen=True)
+class WorkItem:
+    """One unit of work NOVA is asking a runtime to schedule.
+
+    ``depends_on`` names other items by their NOVA ``key``, not by any runtime id: the
+    caller does not know what the runtime will call them, and in a dry run there are no
+    runtime ids at all. The adapter resolves keys to its own identifiers as it goes, which
+    is why items arrive in dependency order.
+
+    ``key`` is also the idempotency key. Submitting the same objective twice must produce
+    one set of work items, not two — a supervisor that duplicates a month-end close on a
+    retry is worse than one that does nothing.
+    """
+
+    key: str
+    title: str
+    assignee: str
+    body: str = ""
+    depends_on: tuple[str, ...] = ()
+    priority: int = 0
+    max_runtime_seconds: Optional[int] = None
+    max_retries: Optional[int] = None
+    #: Ask the runtime to decompose this item rather than run it as a single unit. An
+    #: adapter with no decomposer treats it as an ordinary item and says so in the result.
+    decompose: bool = False
+    tenant_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "title": self.title,
+            "assignee": self.assignee,
+            "depends_on": list(self.depends_on),
+            "priority": self.priority,
+            "decompose": self.decompose,
+        }
+
+
+@dataclass(frozen=True)
+class SubmittedItem:
+    """One work item as the runtime now holds it."""
+
+    key: str
+    task_id: str
+    created: bool
+    assignee: str = ""
+    state: str = ""
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "key": self.key,
+            "task_id": self.task_id,
+            "created": self.created,
+            "assignee": self.assignee,
+            "state": self.state,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class SubmitResult:
+    """What a submission did."""
+
+    items: tuple[SubmittedItem, ...] = ()
+    warnings: tuple[str, ...] = field(default_factory=tuple)
+    dry_run: bool = False
+
+    @property
+    def created(self) -> tuple[str, ...]:
+        return tuple(item.key for item in self.items if item.created)
+
+    @property
+    def existing(self) -> tuple[str, ...]:
+        """Items a previous submission already created. Re-submitting is a no-op, by design."""
+        return tuple(item.key for item in self.items if not item.created)
+
+    def task_id(self, key: str) -> str:
+        for item in self.items:
+            if item.key == key:
+                return item.task_id
+        return ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "dry_run": self.dry_run,
+            "created": list(self.created),
+            "existing": list(self.existing),
+            "items": [item.to_dict() for item in self.items],
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
 class MaterializedAgent:
     """An agent as it currently exists inside a runtime.
 
@@ -432,6 +529,35 @@ class AgentRuntime(ABC):
                 method="native",
                 detail=f"not readable as UTF-8 text and this runtime offers no extractor: {exc}",
             )
+
+    def submit_work(
+        self,
+        items: Sequence[WorkItem],
+        *,
+        audit: AuditLog,
+        correlation_id: str,
+        dry_run: bool = False,
+    ) -> SubmitResult:
+        """Place work on the runtime's board, in dependency order.
+
+        Items arrive already ordered so every item's dependencies precede it; an adapter
+        resolves each ``depends_on`` key to the identifier it minted moments earlier.
+
+        Must be idempotent on ``WorkItem.key``. Re-submitting an objective after a partial
+        failure has to finish it, not duplicate the half that succeeded.
+
+        Creating work is model-visible — a worker will read the title and body this places
+        on the board — so an implementation routes it through
+        ``audit.model_visible_change``.
+
+        The default refuses. An adapter that cannot schedule work must not silently accept
+        a plan and drop it; it reports ``work_submission=False`` and this is what happens
+        if something calls it anyway.
+        """
+        raise RuntimeAdapterError(
+            f"runtime {self.name!r} cannot accept submitted work "
+            "(capabilities.work_submission is False)"
+        )
 
     @abstractmethod
     def usage(self, agent_id: str) -> UsageSummary:

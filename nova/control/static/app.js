@@ -48,10 +48,28 @@ const STATE_TONE = { done: "good", review: "warn", blocked: "crit" };
 const EFFECT_TONE = { deny: "crit", require_approval: "warn", allow: "good" };
 const EFFECT_LABEL = { deny: "refused", require_approval: "escalated", allow: "allowed" };
 
+/* Notices accumulate rather than replacing each other, and problems sort above neutral
+   ones. The single-slot version lost whichever notice was raised first, which meant a
+   governance refusal could be silently replaced by "no knowledge index yet" purely
+   because of the order the panels render in — the least important message winning by
+   arriving last. Deduplicated by text so a re-render does not stack copies. */
+const NOTICES = [];
+
 function showBanner(message, tone) {
+  if (!message) return;
+  if (!NOTICES.some((notice) => notice.message === message)) {
+    NOTICES.push({ message, problem: tone === "problem" });
+  }
   const banner = document.getElementById("banner");
-  banner.textContent = message;
-  banner.className = tone === "problem" ? "banner problem" : "banner";
+  banner.replaceChildren();
+  const ordered = [
+    ...NOTICES.filter((notice) => notice.problem),
+    ...NOTICES.filter((notice) => !notice.problem),
+  ];
+  for (const notice of ordered) {
+    banner.appendChild(el("div", notice.problem ? "notice problem" : "notice", notice.message));
+  }
+  banner.className = ordered.some((notice) => notice.problem) ? "banner problem" : "banner";
   banner.hidden = false;
 }
 
@@ -214,6 +232,85 @@ const ENFORCEMENT_LABEL = {
   observed_only: "observed",
 };
 const ENFORCEMENT_TONE = { hard_preemptive: "good", hard_boundary: "good" };
+
+/* Objective states. Only the two that need a person carry colour — "running" and
+   "not started" are just where a process happens to be. */
+const OBJECTIVE_TONE = { done: "good", blocked: "crit", needs_review: "warn" };
+const OBJECTIVE_LABEL = {
+  not_started: "not started",
+  needs_review: "needs review",
+};
+
+function renderObjectives(payload) {
+  const target = document.getElementById("objectives");
+  const count = document.getElementById("objective-count");
+  target.replaceChildren();
+
+  const objectives = payload.objectives || [];
+  count.textContent = objectives.length
+    ? plural(objectives.length, "objective")
+    : "none declared";
+
+  if (!objectives.length) {
+    target.appendChild(
+      emptyState(
+        "No objectives declared",
+        "Add objectives/<name>.yaml to the tenant bundle to declare a repeatable process."
+      )
+    );
+    return;
+  }
+
+  const rows = objectives.map((objective) => {
+    const what = el("td");
+    what.appendChild(el("div", "name", objective.title || objective.id));
+    if (objective.description) what.appendChild(el("div", "sub", objective.description));
+
+    const state = el("td");
+    /* A refused objective is not "not started" — nothing is waiting to happen, and
+       nothing will until someone changes the delegation policy. Saying so in the state
+       column is the difference between a person investigating and a person waiting. */
+    if (!objective.routing_allowed) {
+      state.appendChild(pill("refused", "crit"));
+      state.appendChild(
+        el("div", "sub", plural(objective.refusals.length, "step") + " not permitted")
+      );
+    } else {
+      const value = objective.state || "";
+      state.appendChild(pill(OBJECTIVE_LABEL[value] || value, OBJECTIVE_TONE[value] || null));
+    }
+
+    const progress = el("td", "num", `${objective.done}/${objective.total}`);
+    const owner = el("td", "id", objective.owner_display_name || objective.owner);
+
+    const blocking = el("td", "id");
+    if (!objective.routing_allowed) {
+      blocking.textContent = (objective.refusals[0] || {}).step_id || "—";
+    } else {
+      blocking.textContent = (objective.blocking || []).join(", ") || "—";
+    }
+
+    return [what, owner, state, progress, blocking];
+  });
+
+  target.appendChild(
+    table(["Objective", "Owner", "State", "Steps done", "Attention"], rows)
+  );
+
+  /* A refusal is a governance event, not a rendering detail: the tenant declared work that
+     their own delegation policy forbids, and nothing will run until that is resolved. */
+  const refused = objectives.filter((objective) => !objective.routing_allowed);
+  if (refused.length) {
+    const first = refused[0];
+    const detail = (first.refusals[0] || {}).detail || "";
+    /* The detail sentence is written without trailing punctuation so it can be embedded in
+       a table cell; punctuate it here rather than running two sentences together. */
+    const stop = /[.!?]$/.test(detail) ? "" : ".";
+    showBanner(`${first.id}: ${detail}${stop} Nothing was submitted.`, "problem");
+  }
+
+  if (payload.detail) showBanner(`Objectives: ${payload.detail}`, "problem");
+}
 
 /* Classification is the customer's own label for how sensitive a corpus is. Only the two
    that mean "be careful who reads this" carry colour; public and internal stay neutral ink,
@@ -519,7 +616,8 @@ async function boot() {
   }
 
   try {
-    const [health, agents, tasks, policy, decisions, budget, knowledge] = await Promise.all([
+    const [health, agents, tasks, policy, decisions, budget, knowledge, objectives] =
+      await Promise.all([
       getJSON("/health"),
       getJSON("/agents"),
       getJSON("/tasks?limit=100"),
@@ -527,12 +625,14 @@ async function boot() {
       getJSON("/decisions?limit=50"),
       getJSON("/budget"),
       getJSON("/knowledge"),
+      getJSON("/objectives"),
     ]);
     renderHealth(health);
     renderStats(agents, tasks);
     renderAgents(agents);
     renderTasks(tasks);
     renderPolicy(policy);
+    renderObjectives(objectives);
     renderKnowledge(knowledge);
     renderDecisions(decisions);
     renderControls(budget);

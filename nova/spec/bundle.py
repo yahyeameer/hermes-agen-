@@ -7,6 +7,7 @@ Layout::
       identity.yaml         optional — white-label surface; defaults apply when absent
       policy.yaml           optional — business actions, permissions, enforcement defaults
       knowledge.yaml        optional — the corpora agents may be granted
+      objectives/*.yaml     optional — repeatable business processes
       agents/*.yaml         one AgentSpec per file
       prompts/*.md          persona files referenced by agents
 
@@ -27,6 +28,7 @@ import yaml
 
 from nova.errors import SpecError
 from nova.knowledge.sources import KnowledgeCatalog, load_catalog
+from nova.spec.objective import ObjectiveSpec, load_objectives
 from nova.spec.agent import AgentSpec
 from nova.spec.identity import IdentitySpec
 from nova.policy.model import PolicySpec
@@ -65,6 +67,9 @@ class TenantBundle:
     #: Declared corpora. An empty catalog means no agent gets a knowledge tool — the same
     #: "absent is a valid state" rule the policy follows.
     knowledge: KnowledgeCatalog = field(default_factory=KnowledgeCatalog)
+    #: Repeatable business processes. Declared here, submitted on demand — loading a bundle
+    #: never puts work on a board.
+    objectives: tuple[ObjectiveSpec, ...] = ()
 
     @property
     def tenant_id(self) -> str:
@@ -88,6 +93,7 @@ class TenantBundle:
                 "identity": self.identity.to_dict(),
                 "policy": self.policy.to_dict() if self.policy else None,
                 "knowledge": self.knowledge.to_dict(),
+                "objectives": [spec.to_dict() for spec in self.objectives],
                 "agents": [spec.to_dict() for spec in sorted(self.agents, key=lambda s: s.id)],
             },
             sort_keys=True,
@@ -103,6 +109,7 @@ class TenantBundle:
             "identity": self.identity.to_dict(),
             "policy": self.policy.to_dict() if self.policy else None,
             "knowledge": self.knowledge.to_dict(),
+            "objectives": [spec.to_dict() for spec in self.objectives],
             "agents": [spec.to_dict() for spec in self.agents],
         }
 
@@ -136,12 +143,15 @@ def load_bundle(root: Path | str, *, env: Optional[Mapping[str, str]] = None) ->
     )
 
     knowledge = load_catalog(root, env=env)
+    objectives = load_objectives(root, env=env)
 
     agents = _load_agents(root, env=env)
     _check_cross_references(agents, identity)
     _check_knowledge_references(agents, knowledge)
     if policy is not None:
         _check_policy_references(agents, policy)
+
+    _check_objective_references(agents, objectives)
 
     return TenantBundle(
         root=root,
@@ -150,7 +160,33 @@ def load_bundle(root: Path | str, *, env: Optional[Mapping[str, str]] = None) ->
         agents=agents,
         policy=policy,
         knowledge=knowledge,
+        objectives=objectives,
     )
+
+
+def _check_objective_references(
+    agents: tuple[AgentSpec, ...], objectives: tuple[ObjectiveSpec, ...]
+) -> None:
+    """Every objective names agents that exist.
+
+    Only existence is checked here. Whether the owner is *permitted* to delegate to each
+    assignee is a routing decision, and it lives in :mod:`nova.supervisor.route` rather
+    than in bundle loading — a tenant must be able to load a bundle, see exactly which
+    delegations their policy forbids, and decide whether to widen the policy or reroute
+    the step. Failing the whole load would leave them with one error message and no way to
+    see the rest.
+    """
+    known = {spec.id for spec in agents}
+    for objective in objectives:
+        names = {objective.owner} | {step.assignee for step in objective.steps}
+        unknown = sorted(names - known)
+        if unknown:
+            raise SpecError(
+                f"names unknown agent(s): {', '.join(unknown)}; "
+                f"known agents: {', '.join(sorted(known))}",
+                field="owner/steps.assignee",
+                source=objective.source,
+            )
 
 
 def _check_knowledge_references(

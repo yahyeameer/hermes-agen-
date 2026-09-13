@@ -83,15 +83,43 @@ def _row_to_task(row: sqlite3.Row) -> TaskView:
         consecutive_failures=int(get("consecutive_failures", 0) or 0),
         last_error=str(get("last_failure_error", "") or ""),
         tenant_id=str(get("tenant", "") or ""),
+        # The supervisor matches its plan steps to board items by this key, never by
+        # title: two objectives with a "Review findings" step would otherwise report each
+        # other's progress. Carried in ``detail`` because "the caller's own identifier" is
+        # a NOVA concept, and putting it on the contract would oblige every future adapter
+        # to have one.
+        detail={"idempotency_key": str(get("idempotency_key", "") or "")},
     )
 
 
-#: Columns read. Named explicitly rather than ``SELECT *`` so a schema change upstream
-#: surfaces as a clear error here instead of silently reshaping the view.
-_COLUMNS = (
-    "id, title, status, assignee, created_at, started_at, completed_at, priority, "
-    "consecutive_failures, last_failure_error, tenant"
+#: Columns read, named explicitly rather than ``SELECT *`` so this module says what it
+#: depends on. Only ``id``, ``title`` and ``status`` are load-bearing; the rest enrich the
+#: view and :func:`_row_to_task` already tolerates any of them being absent.
+_WANTED_COLUMNS = (
+    "id", "title", "status", "assignee", "created_at", "started_at", "completed_at",
+    "priority", "consecutive_failures", "last_failure_error", "tenant", "idempotency_key",
 )
+
+
+def _columns(connection: sqlite3.Connection) -> str:
+    """The wanted columns that this store actually has, as a SELECT list.
+
+    Asking rather than assuming, because the alternative fails in the worst available way.
+    A fixed list against a store missing one column raises inside the query, and both
+    readers below turn a ``sqlite3.Error`` into an empty result — so a single renamed or
+    not-yet-added column upstream would render the dashboard as "no tasks at all" rather
+    than as an error anyone could act on. Selecting the intersection degrades one field at
+    a time instead, which is what the defensive accessors in :func:`_row_to_task` were
+    always written for.
+    """
+    try:
+        present = {row[1] for row in connection.execute("PRAGMA table_info(tasks)")}
+    except sqlite3.Error:
+        present = set()
+    usable = [name for name in _WANTED_COLUMNS if name in present]
+    # An empty intersection means this is not a task table at all; let the caller's error
+    # handling report an unreadable store rather than emitting `SELECT  FROM tasks`.
+    return ", ".join(usable) if usable else "id, title, status"
 
 
 def list_tasks(home: Path, *, agent_id: str = "", limit: int = 200) -> list[TaskView]:
@@ -100,7 +128,7 @@ def list_tasks(home: Path, *, agent_id: str = "", limit: int = 200) -> list[Task
     with _readonly(work_store_path(home)) as connection:
         if connection is None:
             return []
-        query = f"SELECT {_COLUMNS} FROM tasks"  # noqa: S608 — fixed column list, no user input
+        query = f"SELECT {_columns(connection)} FROM tasks"  # noqa: S608 — names from PRAGMA
         params: list[object] = []
         if agent_id:
             query += " WHERE assignee = ?"
@@ -120,7 +148,7 @@ def get_task(home: Path, task_id: str) -> Optional[TaskView]:
             return None
         try:
             row = connection.execute(
-                f"SELECT {_COLUMNS} FROM tasks WHERE id = ?",  # noqa: S608 — fixed columns
+                f"SELECT {_columns(connection)} FROM tasks WHERE id = ?",  # noqa: S608
                 (task_id,),
             ).fetchone()
         except sqlite3.Error:

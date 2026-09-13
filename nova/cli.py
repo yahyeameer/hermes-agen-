@@ -99,6 +99,30 @@ def _build_parser() -> argparse.ArgumentParser:
     knowledge_search.add_argument("--source", action="append", default=[], dest="sources")
     knowledge_search.add_argument("--limit", type=int, default=5)
 
+    objective = sub.add_parser("objective", help="plan, submit and follow business objectives")
+    objective_sub = objective.add_subparsers(dest="objective_command", required=True)
+
+    obj_list = objective_sub.add_parser("list", help="declared objectives and how they route")
+    obj_list.add_argument("bundle", type=Path)
+
+    obj_plan = objective_sub.add_parser(
+        "plan", help="route an objective and show the plan — writes nothing"
+    )
+    obj_plan.add_argument("bundle", type=Path)
+    obj_plan.add_argument("objective")
+
+    obj_submit = objective_sub.add_parser("submit", help="place an objective's steps on the board")
+    obj_submit.add_argument("bundle", type=Path)
+    obj_submit.add_argument("objective")
+    obj_submit.add_argument(
+        "--dry-run", action="store_true", help="show what would be created, write nothing"
+    )
+
+    obj_status = objective_sub.add_parser("status", help="an objective's state, read from the runtime")
+    obj_status.add_argument("bundle", type=Path)
+    obj_status.add_argument("objective", nargs="?", default="")
+    obj_status.add_argument("--json", action="store_true")
+
     serve_cmd = sub.add_parser("serve", help="run the read-only Control API and dashboard")
     serve_cmd.add_argument("bundle", type=Path)
     serve_cmd.add_argument("--host", default="127.0.0.1", help="default: loopback only")
@@ -123,6 +147,115 @@ def _report(report, *, verb: str) -> None:
         print(f"  warning:  {warning}")
     if report.dry_run:
         print(f"\nNothing was written. Re-run `nova {verb}` without --dry-run to apply.")
+
+
+def _objective(args) -> int:
+    """``nova objective ...`` — route, submit and follow declared business processes."""
+    from nova.supervisor import collect, plan_order, route_objective, submit_objective
+
+    bundle = load_bundle(args.bundle)
+    runtime = get_runtime(args.runtime, home=args.home, tenant_id=bundle.tenant_id)
+
+    if not bundle.objectives:
+        print(f"{bundle.tenant_id}: no objectives declared (objectives/ is absent or empty)")
+        return 0
+
+    def find(objective_id: str):
+        for spec in bundle.objectives:
+            if spec.id == objective_id:
+                return spec
+        known = ", ".join(spec.id for spec in bundle.objectives)
+        raise NovaError(f"no objective {objective_id!r}; declared: {known}")
+
+    if args.objective_command == "list":
+        for spec in bundle.objectives:
+            decision = route_objective(spec, bundle.agents)
+            state = "ok" if decision.allowed else f"REFUSED ({len(decision.refusals)})"
+            flag = "" if spec.enabled else "  (disabled)"
+            print(f"  {spec.id:26} {len(spec.steps)} step(s)  owner={spec.owner:18} {state}{flag}")
+        return 0
+
+    if args.objective_command == "plan":
+        spec = find(args.objective)
+        decision = route_objective(spec, bundle.agents)
+        print(f"{spec.title}  ({spec.id})")
+        print(f"owner: {spec.owner}")
+        if spec.acceptance:
+            print(f"done when: {spec.acceptance}")
+        print()
+        # Printed in execution order rather than declaration order: the question a reader
+        # has in front of a plan is what runs when, and steps with no dependencies at the
+        # top of the list is the answer.
+        for step in plan_order(spec):
+            routing = next(r for r in decision.steps if r.step_id == step.id)
+            mark = "ok " if routing.allowed else "REFUSED"
+            waits = f"  after {', '.join(step.depends_on)}" if step.depends_on else "  (starts immediately)"
+            print(f"  [{mark}] {step.id:22} -> {step.assignee:18}{waits}")
+            if not routing.allowed:
+                print(f"           {routing.detail}")
+        for warning in decision.warnings:
+            print(f"\n  warning: {warning}")
+        print()
+        print(decision.explain().splitlines()[0])
+        return 0 if decision.allowed else 1
+
+    if args.objective_command == "submit":
+        spec = find(args.objective)
+        audit = (
+            NullAuditLog(tenant_id=bundle.tenant_id)
+            if args.dry_run
+            else AuditLog.for_home(
+                runtime.state_location, tenant_id=bundle.tenant_id, actor="nova-cli"
+            )
+        )
+        report = submit_objective(
+            spec,
+            bundle.agents,
+            runtime,
+            audit=audit,
+            tenant_id=bundle.tenant_id,
+            dry_run=args.dry_run,
+        )
+        print(report.summary())
+        for warning in report.warnings:
+            print(f"  warning: {warning}")
+        if report.refused:
+            print("\nNothing was submitted. Fix the routing above, or widen the owner's "
+                  "delegation.may_assign_to, then re-run.")
+            return 1
+        if report.result is not None:
+            for item in report.result.items:
+                # A dry run has created nothing, and a row that says "created" next to a
+                # missing task id invites exactly the wrong reading.
+                if args.dry_run:
+                    mark = "would add"
+                else:
+                    mark = "created" if item.created else "existing"
+                print(f"  {mark:9} {item.key:44} {item.task_id or '-'}  {item.state or '-'}")
+        if args.dry_run:
+            print("\nNothing was written. Re-run without --dry-run to submit.")
+        return 0
+
+    # status
+    selected = [find(args.objective)] if args.objective else list(bundle.objectives)
+    tasks = runtime.list_tasks(limit=1000)
+    reports = [collect(spec, runtime, tasks=tasks) for spec in selected]
+
+    if args.json:
+        print(json.dumps([report.to_dict() for report in reports], indent=2))
+        return 0
+
+    for report in reports:
+        print(report.summary())
+        for step in report.steps:
+            state = step.state if step.submitted else "not submitted"
+            flag = "  !" if step.needs_attention else ""
+            print(f"    {step.step_id:22} {state:14} {step.assignee:18}{flag}")
+            if step.last_error:
+                print(f"      last error: {step.last_error}")
+        for warning in report.warnings:
+            print(f"    warning: {warning}")
+    return 0
 
 
 def _knowledge(args) -> int:
@@ -269,6 +402,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "knowledge":
             return _knowledge(args)
+
+        if args.command == "objective":
+            return _objective(args)
 
         if args.command == "serve":
             from nova.control import ControlAPI, serve

@@ -24,7 +24,8 @@ def seed_tasks(home, rows):
         "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, body TEXT, "
         "assignee TEXT, status TEXT NOT NULL, priority INTEGER DEFAULT 0, created_by TEXT, "
         "created_at INTEGER NOT NULL, started_at INTEGER, completed_at INTEGER, tenant TEXT, "
-        "consecutive_failures INTEGER NOT NULL DEFAULT 0, last_failure_error TEXT)"
+        "consecutive_failures INTEGER NOT NULL DEFAULT 0, last_failure_error TEXT, "
+        "idempotency_key TEXT)"
     )
     now = int(time.time())
     for index, (task_id, title, agent, status, failures) in enumerate(rows):
@@ -416,3 +417,82 @@ def test_a_corpus_left_in_the_index_after_being_undeclared_is_surfaced(api, bund
         )
 
     assert api.handle("/platform/v1/knowledge").body["undeclared_in_index"] == ["retired-wiki"]
+
+
+def test_a_work_store_missing_an_optional_column_still_lists_tasks(api, home):
+    """A fixed column list turns one absent column into "no tasks at all".
+
+    Both readers convert a ``sqlite3.Error`` into an empty result, so a column upstream has
+    not added yet — or has renamed — would render the dashboard as an empty board rather
+    than as an error anyone could act on. The reader asks the store what it has instead.
+    """
+    import sqlite3
+
+    from nova.runtime.hermes.work import work_store_path
+
+    path = work_store_path(home)
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE tasks (id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL, "
+        "assignee TEXT, created_at INTEGER NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO tasks (id,title,status,assignee,created_at) VALUES ('t9','Old schema',"
+        "'running','operations',1)"
+    )
+    connection.commit()
+    connection.close()
+
+    body = api.handle("/platform/v1/tasks").body
+    assert [task["task_id"] for task in body["tasks"]] == ["t9"]
+    assert body["tasks"][0]["state"] == "running"
+
+
+# -- objectives --------------------------------------------------------------
+
+
+def test_objectives_reports_routing_and_progress_together(api, bundle):
+    """Separately neither answers the question: "blocked" needs opposite responses
+    depending on whether a step is failing or a delegation was never authorised."""
+    body = api.handle("/platform/v1/objectives").body
+    assert body["declared"] is True
+    assert body["work_submission"] is True
+    row = body["objectives"][0]
+    assert row["id"] == "quarterly-refund-audit"
+    assert row["routing_allowed"] is True
+    assert row["state"] == "not_started"
+    assert row["total"] == 4
+
+
+def test_objectives_surfaces_a_refused_delegation_with_its_reason(api, bundle, runtime):
+    """The refusal is the governance event; the dashboard must be able to explain it."""
+    from dataclasses import replace
+
+    from nova.control.api import ControlAPI
+
+    stripped = replace(
+        bundle,
+        agents=tuple(
+            replace(spec, delegation=replace(spec.delegation, may_assign_to=()))
+            if spec.id == "operations"
+            else spec
+            for spec in bundle.agents
+        ),
+    )
+    body = ControlAPI(stripped, runtime).handle("/platform/v1/objectives").body
+    row = body["objectives"][0]
+    assert row["routing_allowed"] is False
+    assert row["refusals"]
+    assert "may_assign_to" in row["refusals"][0]["detail"]
+
+
+def test_objectives_says_plainly_when_none_are_declared(api, bundle, runtime):
+    from dataclasses import replace
+
+    from nova.control.api import ControlAPI
+
+    body = ControlAPI(replace(bundle, objectives=()), runtime).handle(
+        "/platform/v1/objectives"
+    ).body
+    assert body["declared"] is False
+    assert body["objectives"] == []

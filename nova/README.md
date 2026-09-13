@@ -17,6 +17,7 @@ the authoritative boundary definition.
 | `docs/platform/PHASE_2.md` | Policy and governance: how enforcement works, and what it cannot yet express |
 | `docs/platform/PHASE_3.md` | Budget controls: what is enforced, what is only observed, and why |
 | `docs/platform/PHASE_4.md` | Knowledge: declared corpora, scoped retrieval, and the trust boundary around it |
+| `docs/platform/PHASE_5.md` | Supervisor: objectives routed under the tenant's delegation policy |
 | `docs/platform/BUDGET_ENFORCEMENT_AUDIT.md` | What the runtime exposes for usage and limits, and which of it is enforceable |
 | `docs/platform/KNOWLEDGE_CAPABILITY_AUDIT.md` | What exists for knowledge, retrieval and documents; what to reuse versus build |
 | `docs/platform/CORE_PATCHES.md` | The patch budget — every upstream file touched, and why |
@@ -33,12 +34,12 @@ runtime/        AgentRuntime contract, registry, and the Hermes adapter    [buil
 audit/          Append-only log enforcing "model-visible means logged"     [built]
 policy/         Declaration, compilation, decisions and limit vocabulary   [built]
 control/        Control API (read-only) + the dashboard                    [built]
-knowledge/      Declare -> chunk -> index -> search, scoped per agent       [built]
+knowledge/      Declare -> chunk -> index -> search, scoped per agent      [built]
+supervisor/     Objectives routed under the declared delegation policy     [built]
 apply.py        Bundle -> runtime orchestration                            [built]
-cli.py          `validate | plan | apply | status | knowledge | serve`     [built]
-examples/       A two-agent tenant bundle with two corpora                 [built]
+cli.py          `validate | plan | apply | status | knowledge | objective` [built]
+examples/       Two agents, two corpora, one objective                     [built]
 
-supervisor/     Decompose -> route -> task board -> collect                [planned]
 observability/  JSON logs, correlation IDs, CloudWatch                     [planned]
 ```
 
@@ -55,6 +56,10 @@ python -m nova status
 
 python -m nova knowledge ingest nova/examples/acme
 python -m nova knowledge search nova/examples/acme "refund approval" --as-agent customer-support
+
+python -m nova objective plan   nova/examples/acme quarterly-refund-audit
+python -m nova objective submit nova/examples/acme quarterly-refund-audit
+python -m nova objective status nova/examples/acme
 
 python -m nova serve nova/examples/acme   # dashboard on 127.0.0.1:8787
 ```

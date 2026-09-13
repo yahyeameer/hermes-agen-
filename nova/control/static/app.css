@@ -131,6 +131,10 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
    actual problems is what keeps it meaningful when one appears. */
 .banner { background: var(--sunk); color: var(--muted); border: 1px solid var(--line); padding: 0.8rem 1rem; margin: 1.2rem 0; font-size: 0.9rem; border-radius: 3px; }
 .banner.problem { background: var(--crit-tint); color: var(--crit-ink); border-color: var(--crit); }
+/* Several notices can stand at once; a neutral one inside a problem banner keeps its
+   own ink so it does not read as part of the problem. */
+.banner .notice + .notice { margin-top: 0.55rem; padding-top: 0.55rem; border-top: 1px solid var(--line); }
+.banner.problem .notice:not(.problem) { color: var(--muted); }
 
 footer { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--line); font-size: 0.78rem; color: var(--faint); display: flex; flex-wrap: wrap; gap: 0.4rem 1.5rem; }
 footer a { color: var(--accent); }

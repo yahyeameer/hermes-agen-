@@ -114,6 +114,9 @@ def test_orphaned_agent_warns_but_is_never_deleted(tmp_path, runtime, audit, hom
         ),
         encoding="utf-8",
     )
+    # The example objective is owned by operations; an objective naming a deleted agent is
+    # its own (correctly reported) error, and this test is about orphaned profiles.
+    shutil.rmtree(reduced / "objectives")
     report = apply_bundle(load_bundle(reduced), runtime, audit=audit)
     assert any("no longer in the bundle" in w for w in report.warnings)
     assert HermesPaths(home=home).profile_dir("operations").exists()

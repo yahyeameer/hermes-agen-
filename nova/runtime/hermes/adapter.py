@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
-from typing import Mapping, Optional
+from typing import Mapping, Optional, Sequence
 
 import yaml
 
@@ -19,10 +19,13 @@ from nova.runtime.base import (
     RuntimeCapabilities,
     ExtractedDocument,
     RuntimeHealth,
+    SubmitResult,
     TaskView,
     UsageSummary,
+    WorkItem,
 )
 from nova.runtime.hermes import materialize as _materialize
+from nova.runtime.hermes import submit as _submit
 from nova.runtime.hermes import extract as _extract
 from nova.runtime.hermes import usage as _usage
 from nova.runtime.hermes.limits import LIMIT_FACTS
@@ -44,6 +47,9 @@ from nova.spec import AgentSpec, IdentitySpec
 #: does not touch.
 #: ``document_extraction`` is True because the runtime ships extractors for PDF, Office and
 #: OpenDocument formats, which NOVA borrows rather than reimplements (see ``extract.py``).
+#: ``work_submission`` is True: NOVA creates tasks through ``kanban_db.create_task`` — the
+#: runtime's own API for its own shared board, which is a different database from the
+#: conversation and credential state on ``materialize.NEVER_WRITE``.
 #: ``policy_enforcement`` is True: policy compiles to a plugin on the runtime's documented
 #: pre-tool-call hook, which vetoes a call or escalates it to the same human gate that
 #: guards dangerous shell commands — and that gate fails closed with no human present.
@@ -55,6 +61,7 @@ HERMES_CAPABILITIES = RuntimeCapabilities(
     tool_scoping=True,
     knowledge_retrieval=True,
     document_extraction=True,
+    work_submission=True,
     policy_enforcement=True,
     brand_projection=True,
 )
@@ -147,6 +154,39 @@ class HermesRuntime(AgentRuntime):
                 dry_run=False,
             )
             outcome.update(result.to_detail())
+        return result
+
+    def submit_work(
+        self,
+        items: Sequence[WorkItem],
+        *,
+        audit: AuditLog,
+        correlation_id: str,
+        dry_run: bool = False,
+    ) -> SubmitResult:
+        detail = {
+            "runtime": self.name,
+            "items": len(items),
+            "assignees": sorted({item.assignee for item in items}),
+        }
+        if dry_run:
+            result = _submit.submit(self.paths.home, items, dry_run=True)
+            audit.record(
+                "work.submit_preview",
+                correlation_id=correlation_id,
+                subject=items[0].key.split(":")[0] if items else "",
+                detail={**detail, **result.to_dict()},
+            )
+            return result
+
+        with audit.model_visible_change(
+            "work.submitted",
+            correlation_id=correlation_id,
+            subject=items[0].key.split(":")[0] if items else "",
+            detail=detail,
+        ) as outcome:
+            result = _submit.submit(self.paths.home, items, dry_run=False)
+            outcome.update(result.to_dict())
         return result
 
     @property

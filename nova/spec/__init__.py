@@ -12,6 +12,7 @@ from nova.spec.agent import (
 )
 from nova.spec.bundle import TenantBundle, load_bundle
 from nova.spec.identity import IdentitySpec, SupportSpec, ThemeSpec
+from nova.spec.objective import ObjectiveSpec, PlanStep, load_objectives
 from nova.spec.organization import OrganizationSpec
 
 __all__ = [
@@ -23,10 +24,13 @@ __all__ = [
     "KnowledgeSpec",
     "LimitsSpec",
     "ModelSpec",
+    "ObjectiveSpec",
     "OrganizationSpec",
+    "PlanStep",
     "SupportSpec",
     "TenantBundle",
     "ThemeSpec",
     "ToolsSpec",
     "load_bundle",
+    "load_objectives",
 ]
