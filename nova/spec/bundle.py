@@ -5,6 +5,7 @@ Layout::
     <bundle>/
       organization.yaml     required — who this deployment serves
       identity.yaml         optional — white-label surface; defaults apply when absent
+      policy.yaml           optional — business actions, permissions, enforcement defaults
       agents/*.yaml         one AgentSpec per file
       prompts/*.md          persona files referenced by agents
 
@@ -26,10 +27,12 @@ import yaml
 from nova.errors import SpecError
 from nova.spec.agent import AgentSpec
 from nova.spec.identity import IdentitySpec
+from nova.policy.model import PolicySpec
 from nova.spec.organization import OrganizationSpec
 
 ORGANIZATION_FILE = "organization.yaml"
 IDENTITY_FILE = "identity.yaml"
+POLICY_FILE = "policy.yaml"
 AGENTS_DIR = "agents"
 
 
@@ -52,6 +55,10 @@ class TenantBundle:
     organization: OrganizationSpec
     identity: IdentitySpec
     agents: tuple[AgentSpec, ...]
+    #: Absent from a bundle means "no policy declared", which is different from an empty
+    #: one: no policy means no enforcement plugin is installed and agents behave exactly
+    #: as they did before governance existed.
+    policy: Optional[PolicySpec] = None
 
     @property
     def tenant_id(self) -> str:
@@ -73,6 +80,7 @@ class TenantBundle:
             {
                 "organization": self.organization.to_dict(),
                 "identity": self.identity.to_dict(),
+                "policy": self.policy.to_dict() if self.policy else None,
                 "agents": [spec.to_dict() for spec in sorted(self.agents, key=lambda s: s.id)],
             },
             sort_keys=True,
@@ -86,6 +94,7 @@ class TenantBundle:
             "digest": self.digest(),
             "organization": self.organization.to_dict(),
             "identity": self.identity.to_dict(),
+            "policy": self.policy.to_dict() if self.policy else None,
             "agents": [spec.to_dict() for spec in self.agents],
         }
 
@@ -111,10 +120,25 @@ def load_bundle(root: Path | str, *, env: Optional[Mapping[str, str]] = None) ->
     else:
         identity = IdentitySpec()
 
+    policy_path = root / POLICY_FILE
+    policy = (
+        PolicySpec.parse(_load_yaml(policy_path) or {}, source=policy_path, env=env)
+        if policy_path.is_file()
+        else None
+    )
+
     agents = _load_agents(root, env=env)
     _check_cross_references(agents, identity)
+    if policy is not None:
+        _check_policy_references(agents, policy)
 
-    return TenantBundle(root=root, organization=organization, identity=identity, agents=agents)
+    return TenantBundle(
+        root=root,
+        organization=organization,
+        identity=identity,
+        agents=agents,
+        policy=policy,
+    )
 
 
 def _load_agents(root: Path, *, env: Optional[Mapping[str, str]]) -> tuple[AgentSpec, ...]:
@@ -167,3 +191,45 @@ def _check_cross_references(agents: tuple[AgentSpec, ...], identity: IdentitySpe
             field="agents",
             source=identity.source,
         )
+
+
+def _check_policy_references(agents: tuple[AgentSpec, ...], policy: PolicySpec) -> None:
+    """Fail on policy declarations that cannot resolve.
+
+    A permission that grants nothing, or an approval requirement nothing can trigger, is a
+    governance control that silently does not exist — the worst kind, because it looks
+    present in a review.
+    """
+    seen_tools: dict[str, str] = {}
+    for action in policy.actions.values():
+        for tool in action.tools:
+            if tool in seen_tools:
+                raise SpecError(
+                    f"tool {tool!r} is claimed by both {seen_tools[tool]!r} and "
+                    f"{action.name!r}; one tool performs one business action",
+                    field=f"actions.{action.name}.tools",
+                    source=policy.source,
+                )
+            seen_tools[tool] = action.name
+
+    for spec in agents:
+        unknown = [name for name in spec.permissions if name not in policy.permissions]
+        if unknown:
+            raise SpecError(
+                f"names permission(s) the tenant policy does not define: "
+                f"{', '.join(sorted(unknown))}; defined: "
+                f"{', '.join(sorted(policy.permissions)) or '(none)'}",
+                field="permissions",
+                source=spec.source,
+            )
+        unknown_actions = [
+            name for name in spec.approval.required_for if name not in policy.actions
+        ]
+        if unknown_actions:
+            raise SpecError(
+                f"requires approval for action(s) the tenant policy does not define: "
+                f"{', '.join(sorted(unknown_actions))}; defined: "
+                f"{', '.join(sorted(policy.actions)) or '(none)'}",
+                field="approval.required_for",
+                source=spec.source,
+            )

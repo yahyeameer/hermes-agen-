@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Optional, Sequence
 
 from nova.audit import AuditLog
+from nova.policy import CompiledPolicy
 from nova.spec import AgentSpec, IdentitySpec
 
 
@@ -47,6 +48,9 @@ class RuntimeCapabilities:
     tool_scoping: bool = False
     #: The runtime can retrieve from a knowledge corpus. False everywhere in Phase 1.
     knowledge_retrieval: bool = False
+    #: Per-agent tool policy is enforced inside the runtime, including escalation of
+    #: business actions to a human. False means a declared policy would be inert.
+    policy_enforcement: bool = False
     #: Branding can be projected into the runtime's own display surfaces.
     brand_projection: bool = False
 
@@ -198,6 +202,7 @@ class AgentRuntime(ABC):
         audit: AuditLog,
         correlation_id: str,
         identity: Optional[IdentitySpec] = None,
+        policy: Optional[CompiledPolicy] = None,
         dry_run: bool = False,
     ) -> MaterializeResult:
         """Create or update one agent inside the runtime.
@@ -206,6 +211,10 @@ class AgentRuntime(ABC):
         identical and reports ``unchanged``. Must route the change through
         ``audit.model_visible_change`` — an agent's instructions and tools are
         model-visible by definition.
+
+        ``policy`` is the agent's compiled policy, or None when the tenant declares none.
+        An adapter that cannot enforce policy must say so through
+        :attr:`RuntimeCapabilities.policy_enforcement` rather than accepting it silently.
         """
 
     @abstractmethod

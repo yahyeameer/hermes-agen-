@@ -135,7 +135,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
             bundle = load_bundle(args.bundle)
             runtime = get_runtime(args.runtime, home=args.home, tenant_id=bundle.tenant_id)
-            api = ControlAPI(bundle, runtime)
+            api = ControlAPI(
+                bundle,
+                runtime,
+                audit=AuditLog.for_home(
+                    runtime.state_location, tenant_id=bundle.tenant_id, actor="nova-control"
+                ),
+            )
             serve(
                 api,
                 host=args.host,

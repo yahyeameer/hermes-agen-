@@ -38,9 +38,14 @@ function pill(label, tone) {
    neutral ink, so colour marks attention rather than decorating every row. */
 const STATE_TONE = { done: "good", review: "warn", blocked: "crit" };
 
-function showBanner(message) {
+/* Policy effects. Only the two that stop or delay an agent carry colour. */
+const EFFECT_TONE = { deny: "crit", require_approval: "warn", allow: "good" };
+const EFFECT_LABEL = { deny: "refused", require_approval: "escalated", allow: "allowed" };
+
+function showBanner(message, tone) {
   const banner = document.getElementById("banner");
   banner.textContent = message;
+  banner.className = tone === "problem" ? "banner problem" : "banner";
   banner.hidden = false;
 }
 
@@ -94,6 +99,105 @@ function renderHealth(health) {
   }
 }
 
+function renderPolicy(policy) {
+  const target = document.getElementById("policy");
+  target.replaceChildren();
+  const label = document.getElementById("policy-count");
+
+  if (!policy.declared) {
+    label.textContent = "not declared";
+    target.appendChild(
+      emptyState(
+        "No policy declared",
+        "Agents run with no platform-level restrictions. Add policy.yaml to the tenant " +
+          "bundle to govern which tools each agent may call and which actions need a human."
+      )
+    );
+    return;
+  }
+
+  label.textContent = policy.enforced ? "enforced by the runtime" : "declared but NOT enforced";
+  if (!policy.enforced) {
+    showBanner(
+      policy.detail || "Policy is declared but this runtime cannot enforce it.",
+      "problem"
+    );
+  }
+
+  const rows = (policy.agents || []).map((agent) => {
+    const name = el("td");
+    name.appendChild(el("div", "name", agent.display_name || agent.id));
+    if (agent.warnings && agent.warnings.length) {
+      for (const warning of agent.warnings) name.appendChild(el("div", "sub", warning));
+    }
+
+    const posture = el("td");
+    posture.appendChild(
+      pill(agent.has_allowlist ? "allow-list" : "open", agent.has_allowlist ? "good" : null)
+    );
+    if (agent.unlisted_tool === "deny") posture.appendChild(el("div", "sub", "unlisted denied"));
+
+    const approvals = el("td");
+    if ((agent.approval_actions || []).length) {
+      approvals.appendChild(el("div", null, agent.approval_actions.join(", ")));
+    } else {
+      approvals.appendChild(el("div", "sub", "none"));
+    }
+
+    return [
+      name,
+      posture,
+      el("td", "num", (agent.allow || []).length),
+      el("td", "num", (agent.deny || []).length),
+      approvals,
+    ];
+  });
+
+  target.appendChild(
+    table(["Agent", "Posture", "Allowed", "Denied", "Needs approval"], rows)
+  );
+}
+
+function renderDecisions(data) {
+  const target = document.getElementById("decisions");
+  target.replaceChildren();
+  const decisions = data.decisions || [];
+  const counts = data.counts || {};
+  document.getElementById("decision-count").textContent = decisions.length
+    ? `${counts.deny || 0} refused · ${counts.require_approval || 0} escalated`
+    : "";
+
+  if (!decisions.length) {
+    target.appendChild(
+      emptyState(
+        "Nothing refused or escalated yet",
+        "Permitted calls are not recorded — only refusals and actions sent for human " +
+          "approval appear here, so this list stays a governance record rather than a log."
+      )
+    );
+    return;
+  }
+
+  const rows = decisions.map((entry) => {
+    const what = el("td");
+    what.appendChild(el("div", "name", entry.tool));
+    if (entry.reason) what.appendChild(el("div", "sub", entry.reason));
+
+    const effect = el("td");
+    effect.appendChild(
+      pill(EFFECT_LABEL[entry.effect] || entry.effect, EFFECT_TONE[entry.effect] || null)
+    );
+
+    return [
+      what,
+      el("td", "id", entry.agent_id || "—"),
+      effect,
+      el("td", "id", entry.action || entry.rule || ""),
+    ];
+  });
+  target.appendChild(table(["Tool", "Agent", "Outcome", "Rule"], rows));
+}
+
 function renderStats(agents, tasks) {
   const stats = document.getElementById("stats");
   stats.replaceChildren();
@@ -105,7 +209,6 @@ function renderStats(agents, tasks) {
   const tiles = [
     ["Agents", declared.length, false],
     ["Running", counts.running || 0, false],
-    ["Pending", counts.pending || 0, false],
     ["Needs attention", tasks.needs_attention || 0, (tasks.needs_attention || 0) > 0],
     ["Out of sync", outOfSync, outOfSync > 0],
   ];
@@ -238,21 +341,25 @@ async function boot() {
     const identity = await getJSON("/identity");
     applyIdentity(identity);
   } catch (error) {
-    showBanner(`Could not load identity: ${error.message}`);
+    showBanner(`Could not load identity: ${error.message}`, "problem");
   }
 
   try {
-    const [health, agents, tasks] = await Promise.all([
+    const [health, agents, tasks, policy, decisions] = await Promise.all([
       getJSON("/health"),
       getJSON("/agents"),
       getJSON("/tasks?limit=100"),
+      getJSON("/policy"),
+      getJSON("/decisions?limit=50"),
     ]);
     renderHealth(health);
     renderStats(agents, tasks);
     renderAgents(agents);
     renderTasks(tasks);
+    renderPolicy(policy);
+    renderDecisions(decisions);
   } catch (error) {
-    showBanner(`Could not reach the control API: ${error.message}`);
+    showBanner(`Could not reach the control API: ${error.message}`, "problem");
   }
 }
 

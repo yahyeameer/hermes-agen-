@@ -88,3 +88,16 @@ class HermesPaths:
     def provenance_path(self, agent_id: str) -> Path:
         """NOVA's ownership marker — see :mod:`nova.runtime.hermes.materialize`."""
         return self.profile_dir(agent_id) / "nova-agent.json"
+
+    def policy_path(self, agent_id: str) -> Path:
+        """The agent's compiled policy, read by the enforcement plugin."""
+        return self.profile_dir(agent_id) / "nova-policy.json"
+
+    def plugin_dir(self, agent_id: str) -> Path:
+        """The enforcement plugin.
+
+        A worker runs with its profile as the runtime home, and plugin discovery scans
+        ``<home>/plugins``. Installing here therefore scopes the plugin to exactly one
+        agent, with no shared state between agents on the same host.
+        """
+        return self.profile_dir(agent_id) / "plugins" / "nova-policy"

@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from nova.audit import AuditLog, new_correlation_id
+from nova.policy import compile_policy
 from nova.runtime.base import AgentRuntime, MaterializeResult
 from nova.spec import TenantBundle
 
@@ -89,6 +90,12 @@ def apply_bundle(
             "unattended agent work may not survive a restart"
         )
 
+    if bundle.policy is not None and not runtime.capabilities.policy_enforcement:
+        warnings.append(
+            f"a policy is declared but runtime {runtime.name!r} cannot enforce it — every "
+            "rule would be inert. Refusing to present governance that does not exist"
+        )
+
     knowledge_users = [spec.id for spec in bundle.agents if spec.knowledge.sources]
     if knowledge_users and not runtime.capabilities.knowledge_retrieval:
         warnings.append(
@@ -105,6 +112,7 @@ def apply_bundle(
             "runtime": runtime.name,
             "dry_run": dry_run,
             "agents": [spec.id for spec in bundle.agents],
+            "policy_declared": bundle.policy is not None,
             "warnings": warnings,
         },
     )
@@ -120,12 +128,20 @@ def apply_bundle(
         if spec not in selected:
             skipped.append(spec.id)
             continue
+        compiled = compile_policy(spec, bundle.policy) if bundle.policy is not None else None
+        if compiled is not None:
+            warnings.extend(f"{spec.id}: {note}" for note in compiled.warnings)
+            # Runtime-specific fields the portable compiler cannot know: where to record a
+            # refusal, and which tenant it belongs to. Injected here, where both are in hand.
+            compiled.document["tenant_id"] = bundle.tenant_id
+            compiled.document["audit_log"] = str(audit.path)
         results.append(
             runtime.materialize_agent(
                 spec,
                 audit=audit,
                 correlation_id=correlation_id,
                 identity=bundle.identity,
+                policy=compiled,
                 dry_run=dry_run,
             )
         )

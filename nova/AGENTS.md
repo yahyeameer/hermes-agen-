@@ -101,6 +101,25 @@ customer-controlled strings. The Control API is read-only: write methods are ref
 Status colours are reserved semantics, never themed. A customer's accent must not repaint
 "blocked".
 
+## Policy is a security control
+
+`nova/policy/decide.py` is **copied verbatim into the runtime** on every apply. Three rules
+follow from that and none of them are negotiable:
+
+1. **It may import nothing but the standard library.** It runs where NOVA is not installed.
+2. **Every failure path denies.** A missing document, a corrupt one, an unknown schema, an
+   exception: all block. A control that fails open is not a control.
+3. **There is one decision function.** The control plane explaining a decision and the
+   runtime enforcing it must never be two implementations that can disagree — a test
+   asserts the shipped copy is byte-identical.
+
+Deny beats everything, including the worker baseline. When a customer's denial would break
+their own agent, the compiler warns at build time; the runtime does not quietly overrule
+them at execution time.
+
+Enforcement tests load the plugin **by file path with NOVA off the import path**. Do not
+"simplify" them into importing `nova` — that stops testing what actually ships.
+
 ## Tests
 
 Platform tests live under `tests/platform/`. Do not modify existing upstream tests — 3,991 files
@@ -115,4 +134,5 @@ sign the change belongs in `nova/`.
 - [ ] No protected identifier renamed; `scripts/check_protected_identifiers.py` passes.
 - [ ] Platform tests pass (`python -m pytest tests/platform/`), and so does the upstream suite.
 - [ ] Any change to model-visible state goes through `AuditLog.model_visible_change()`.
+- [ ] Any new policy rule fails closed, and `decide.py` still imports only the stdlib.
 - [ ] No new dependency beyond the standard library and PyYAML.

@@ -29,6 +29,7 @@ from typing import Any, Optional
 import yaml
 
 from nova.errors import RuntimeAdapterError
+from nova.policy import CompiledPolicy, agent_digest
 from nova.runtime.base import MaterializeResult
 from nova.runtime.hermes.paths import HermesPaths
 from nova.spec import AgentSpec, IdentitySpec
@@ -57,6 +58,13 @@ NEVER_WRITE: frozenset[str] = frozenset(
 #: Written into every NOVA-managed profile. Its presence is the ownership claim.
 PROVENANCE_FILENAME = "nova-agent.json"
 PROVENANCE_VERSION = 1
+
+#: The plugin's own manifest, shipped beside this module.
+PLUGIN_MANIFEST = Path(__file__).parent / "plugin_manifest.yaml"
+#: The hook entry point, copied verbatim into each agent's plugin directory.
+PLUGIN_ENTRY = Path(__file__).parent / "enforcement.py"
+#: The pure decision module, copied beside it so the same code decides in both places.
+PLUGIN_DECIDE = Path(__file__).parents[2] / "policy" / "decide.py"
 
 
 @dataclass(frozen=True)
@@ -236,7 +244,10 @@ def build_persona(spec: AgentSpec, identity: Optional[IdentitySpec]) -> str:
 
 
 def plan_writes(
-    spec: AgentSpec, paths: HermesPaths, identity: Optional[IdentitySpec]
+    spec: AgentSpec,
+    paths: HermesPaths,
+    identity: Optional[IdentitySpec],
+    policy: Optional[CompiledPolicy] = None,
 ) -> dict[Path, str]:
     """Every file this materialization would write, as path -> content.
 
@@ -247,14 +258,29 @@ def plan_writes(
     provenance = Provenance(
         version=PROVENANCE_VERSION,
         agent_id=spec.id,
-        digest=spec.digest(),
+        # The recorded digest must cover everything materialization depends on, policy
+        # included, or a re-apply compares against a digest it can never match and
+        # reports every agent as changed forever.
+        digest=_combined_digest(spec, policy),
         nova_version=_nova_version(),
     )
-    return {
+    writes = {
         paths.config_path(spec.id): config_text,
         paths.persona_path(spec.id): build_persona(spec, identity),
         paths.provenance_path(spec.id): json.dumps(provenance.to_dict(), indent=2) + "\n",
     }
+
+    # The enforcement plugin is installed ONLY when the tenant declares a policy. Without
+    # one there is nothing to enforce, and installing a plugin that would deny everything
+    # on a missing document would break every agent that predates governance.
+    if policy is not None:
+        plugin_dir = paths.plugin_dir(spec.id)
+        writes[paths.policy_path(spec.id)] = json.dumps(policy.document, indent=2, sort_keys=True) + "\n"
+        writes[plugin_dir / "plugin.yaml"] = PLUGIN_MANIFEST.read_text(encoding="utf-8")
+        writes[plugin_dir / "__init__.py"] = PLUGIN_ENTRY.read_text(encoding="utf-8")
+        writes[plugin_dir / "_decide.py"] = PLUGIN_DECIDE.read_text(encoding="utf-8")
+
+    return writes
 
 
 def _nova_version() -> str:
@@ -268,6 +294,7 @@ def materialize(
     paths: HermesPaths,
     *,
     identity: Optional[IdentitySpec] = None,
+    policy: Optional[CompiledPolicy] = None,
     dry_run: bool = False,
 ) -> MaterializeResult:
     """Create or update one agent's profile. Idempotent.
@@ -287,8 +314,10 @@ def materialize(
         )
 
     created = not profile_dir.exists()
-    digest = spec.digest()
-    writes = plan_writes(spec, paths, identity)
+    # The policy is part of what an agent IS, so it belongs in the identity that decides
+    # whether a re-apply is a change. A policy edit with an unchanged spec must rewrite.
+    digest = _combined_digest(spec, policy)
+    writes = plan_writes(spec, paths, identity, policy)
 
     if existing is not None and existing.digest == digest and not created:
         # Still verify the files are actually present: a deleted SOUL.md with a stale
@@ -304,6 +333,8 @@ def materialize(
         warnings.append("provenance was current but files were missing; rewriting")
 
     warnings.extend(warnings_for(spec))
+    if policy is not None:
+        warnings.extend(policy.warnings)
 
     if dry_run:
         return MaterializeResult(
@@ -328,3 +359,8 @@ def materialize(
         warnings=tuple(warnings),
         location=profile_dir,
     )
+
+
+def _combined_digest(spec: AgentSpec, policy: Optional[CompiledPolicy]) -> str:
+    """Delegates to the one shared definition; see :func:`nova.policy.agent_digest`."""
+    return agent_digest(spec, policy)

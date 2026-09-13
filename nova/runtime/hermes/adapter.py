@@ -22,6 +22,7 @@ from nova.runtime.base import (
 from nova.runtime.hermes import materialize as _materialize
 from nova.runtime.hermes import work as _work
 from nova.runtime.hermes.paths import HermesPaths
+from nova.policy import CompiledPolicy
 from nova.spec import AgentSpec, IdentitySpec
 
 #: What the Hermes runtime provides, as established by the Phase 0 audit.
@@ -32,6 +33,9 @@ from nova.spec import AgentSpec, IdentitySpec
 #: the materializer warns whenever a spec declares it.
 #: ``knowledge_retrieval`` is False because no runtime has it yet; the spec field is
 #: carried through, never silently dropped.
+#: ``policy_enforcement`` is True: policy compiles to a plugin on the runtime's documented
+#: pre-tool-call hook, which vetoes a call or escalates it to the same human gate that
+#: guards dangerous shell commands — and that gate fails closed with no human present.
 HERMES_CAPABILITIES = RuntimeCapabilities(
     durable_tasks=True,
     worktree_isolation=True,
@@ -39,6 +43,7 @@ HERMES_CAPABILITIES = RuntimeCapabilities(
     credential_isolation=True,
     tool_scoping=True,
     knowledge_retrieval=False,
+    policy_enforcement=True,
     brand_projection=True,
 )
 
@@ -80,13 +85,16 @@ class HermesRuntime(AgentRuntime):
         audit: AuditLog,
         correlation_id: str,
         identity: Optional[IdentitySpec] = None,
+        policy: Optional[CompiledPolicy] = None,
         dry_run: bool = False,
     ) -> MaterializeResult:
         if dry_run:
             # A dry run changes nothing, so it is not a model-visible change. It is
             # still recorded: knowing what an operator previewed is useful during an
             # incident, and a plain record() carries no intent/commit pair.
-            result = _materialize.materialize(spec, self.paths, identity=identity, dry_run=True)
+            result = _materialize.materialize(
+                spec, self.paths, identity=identity, policy=policy, dry_run=True
+            )
             audit.record(
                 "agent.materialize_preview",
                 correlation_id=correlation_id,
@@ -100,10 +108,16 @@ class HermesRuntime(AgentRuntime):
             "agent.materialized",
             correlation_id=correlation_id,
             subject=spec.id,
-            digest=spec.digest(),
-            detail={"runtime": self.name, "agent_name": spec.name},
+            digest=_materialize._combined_digest(spec, policy),
+            detail={
+                "runtime": self.name,
+                "agent_name": spec.name,
+                "policy": bool(policy),
+            },
         ) as outcome:
-            result = _materialize.materialize(spec, self.paths, identity=identity, dry_run=False)
+            result = _materialize.materialize(
+                spec, self.paths, identity=identity, policy=policy, dry_run=False
+            )
             outcome.update(result.to_detail())
         return result
 

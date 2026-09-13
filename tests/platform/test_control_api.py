@@ -105,10 +105,17 @@ def test_agents_reports_unmaterialized(api):
 def test_agents_reports_in_sync_after_apply(api, bundle, runtime, audit):
     from nova.apply import apply_bundle
 
+    from nova.policy import agent_digest, compile_policy
+
     apply_bundle(bundle, runtime, audit=audit)
     rows = {a["id"]: a for a in api.handle("/platform/v1/agents").body["agents"]}
     assert rows["customer-support"]["in_sync"] is True
-    assert rows["customer-support"]["applied_digest"] == bundle.agent("customer-support").digest()
+
+    # The digest covers the agent AND the policy compiled for it, so a policy edit alone
+    # shows as drift.
+    spec = bundle.agent("customer-support")
+    expected = agent_digest(spec, compile_policy(spec, bundle.policy))
+    assert rows["customer-support"]["applied_digest"] == expected
 
 
 def test_agents_detects_drift(api, bundle, runtime, audit, home):
@@ -211,3 +218,99 @@ def test_work_store_is_opened_read_only(api, home):
     with pytest.raises(sqlite3.OperationalError):
         connection.execute("UPDATE tasks SET title = 'tampered'")
     connection.close()
+
+
+# -- governance routes -------------------------------------------------------
+
+
+def test_policy_route_reports_enforcement(api):
+    body = api.handle("/platform/v1/policy").body
+    assert body["declared"] is True
+    assert body["enforced"] is True
+    assert "refund" in body["actions"]
+
+
+def test_policy_route_summarises_each_agent(api):
+    rows = {row["id"]: row for row in api.handle("/platform/v1/policy").body["agents"]}
+    assert "crm_lookup" in rows["customer-support"]["allow"]
+    assert "terminal" in rows["customer-support"]["deny"]
+    assert "refund" in rows["customer-support"]["approval_actions"]
+
+
+def test_policy_route_without_a_declared_policy(bundle, runtime):
+    from dataclasses import replace
+
+    unpoliced = ControlAPI(replace(bundle, policy=None), runtime)
+    body = unpoliced.handle("/platform/v1/policy").body
+    assert body["declared"] is False
+    assert body["enforced"] is False
+    assert "no platform-level restrictions" in body["detail"]
+
+
+def test_simulate_explains_a_decision(api):
+    body = api.handle(
+        "/platform/v1/policy/simulate", {"agent": "customer-support", "tool": "crm_refund"}
+    ).body
+    assert body["decision"]["effect"] == "require_approval"
+    assert body["decision"]["action"] == "refund"
+    assert body["decision"]["reason"]
+
+
+def test_simulate_uses_the_same_function_the_runtime_enforces_with(api, bundle):
+    """The explanation and the behaviour must not be able to drift apart."""
+    from nova.policy import compile_policy, decide
+
+    compiled = compile_policy(bundle.agent("operations"), bundle.policy)
+    for tool in ("erp_stock_query", "crm_lookup", "crm_refund", "kanban_complete"):
+        served = api.handle(
+            "/platform/v1/policy/simulate", {"agent": "operations", "tool": tool}
+        ).body["decision"]
+        assert served == decide(compiled.document, tool).to_dict()
+
+
+def test_simulate_validates_its_inputs(api):
+    assert api.handle("/platform/v1/policy/simulate", {"agent": "customer-support"}).status == 400
+    assert api.handle("/platform/v1/policy/simulate", {"tool": "x"}).status == 400
+    assert api.handle("/platform/v1/policy/simulate", {"agent": "ghost", "tool": "x"}).status == 404
+
+
+def test_decisions_route_is_empty_without_an_audit_log(api):
+    assert api.handle("/platform/v1/decisions").body["decisions"] == []
+
+
+def test_decisions_route_reads_recorded_refusals(bundle, runtime, audit):
+    from nova.apply import apply_bundle
+
+    from .test_policy_enforcement import load_installed_plugin
+
+    apply_bundle(bundle, runtime, audit=audit)
+    plugin = load_installed_plugin(runtime.paths.home, "customer-support", "nova_api_probe")
+    plugin.pre_tool_call(tool_name="terminal", args={})
+    plugin.pre_tool_call(tool_name="crm_refund", args={})
+
+    body = ControlAPI(bundle, runtime, audit=audit).handle("/platform/v1/decisions").body
+    assert body["counts"] == {"deny": 1, "require_approval": 1}
+    assert {row["tool"] for row in body["decisions"]} == {"terminal", "crm_refund"}
+
+
+def test_decisions_route_filters_by_agent(bundle, runtime, audit):
+    from nova.apply import apply_bundle
+
+    from .test_policy_enforcement import load_installed_plugin
+
+    apply_bundle(bundle, runtime, audit=audit)
+    load_installed_plugin(runtime.paths.home, "customer-support", "nova_f1").pre_tool_call(
+        tool_name="terminal", args={}
+    )
+    load_installed_plugin(runtime.paths.home, "operations", "nova_f2").pre_tool_call(
+        tool_name="crm_lookup", args={}
+    )
+
+    api = ControlAPI(bundle, runtime, audit=audit)
+    body = api.handle("/platform/v1/decisions", {"agent": "operations"}).body
+    assert {row["agent_id"] for row in body["decisions"]} == {"operations"}
+
+
+def test_decisions_limit_is_validated(api):
+    assert api.handle("/platform/v1/decisions", {"limit": "abc"}).status == 400
+    assert api.handle("/platform/v1/decisions", {"limit": "0"}).status == 400

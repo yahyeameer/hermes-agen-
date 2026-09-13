@@ -127,7 +127,10 @@ td.num { text-align: right; font-variant-numeric: tabular-nums; }
 /* empty + error states */
 .empty { background: var(--surface); border: 1px solid var(--line); padding: 1.5rem 1.2rem; color: var(--muted); font-size: 0.9rem; }
 .empty strong { color: var(--ink); display: block; margin-bottom: 0.2rem; font-size: 0.95rem; }
-.banner { background: var(--crit-tint); color: var(--crit-ink); border: 1px solid var(--crit); padding: 0.8rem 1rem; margin: 1.2rem 0; font-size: 0.9rem; border-radius: 3px; }
+/* Two tones. A neutral notice is not a failure: reserving the critical colour for
+   actual problems is what keeps it meaningful when one appears. */
+.banner { background: var(--sunk); color: var(--muted); border: 1px solid var(--line); padding: 0.8rem 1rem; margin: 1.2rem 0; font-size: 0.9rem; border-radius: 3px; }
+.banner.problem { background: var(--crit-tint); color: var(--crit-ink); border-color: var(--crit); }
 
 footer { margin-top: 2.5rem; padding-top: 1rem; border-top: 1px solid var(--line); font-size: 0.78rem; color: var(--faint); display: flex; flex-wrap: wrap; gap: 0.4rem 1.5rem; }
 footer a { color: var(--accent); }

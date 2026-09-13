@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
 from nova import __version__
+from nova.audit import AuditLog
+from nova.policy import agent_digest, compile_policy, decide
 from nova.runtime.base import AgentRuntime
 from nova.spec import TenantBundle
 
@@ -48,9 +50,22 @@ class ControlAPI:
     so rather than presenting one as the other.
     """
 
-    def __init__(self, bundle: TenantBundle, runtime: AgentRuntime) -> None:
+    def __init__(
+        self,
+        bundle: TenantBundle,
+        runtime: AgentRuntime,
+        *,
+        audit: Optional[AuditLog] = None,
+    ) -> None:
         self.bundle = bundle
         self.runtime = runtime
+        self.audit = audit
+
+    def _compiled(self, agent_id: str):
+        """The compiled policy for one agent, or None when no policy is declared."""
+        if self.bundle.policy is None:
+            return None
+        return compile_policy(self.bundle.agent(agent_id), self.bundle.policy)
 
     # -- routing --------------------------------------------------------------
 
@@ -72,6 +87,12 @@ class ControlAPI:
         if tail.startswith("/tasks/"):
             task_id = tail[len("/tasks/") :]
             return self.task(task_id) if task_id else _error(404, "no task id given")
+        if tail == "/policy":
+            return self.policy()
+        if tail == "/policy/simulate":
+            return self.simulate(query)
+        if tail == "/decisions":
+            return self.decisions(query)
         return _error(404, f"no such route: {path}")
 
     # -- routes ---------------------------------------------------------------
@@ -117,6 +138,7 @@ class ControlAPI:
         rows: list[dict[str, Any]] = []
         for spec in self.bundle.agents:
             live = applied.get(spec.id)
+            declared_digest = agent_digest(spec, self._compiled(spec.id))
             rows.append(
                 {
                     "id": spec.id,
@@ -126,8 +148,8 @@ class ControlAPI:
                     "enabled": spec.enabled,
                     "model": spec.model.to_dict(),
                     "materialized": live is not None,
-                    "in_sync": bool(live and live.digest == spec.digest()),
-                    "declared_digest": spec.digest(),
+                    "in_sync": bool(live and live.digest == declared_digest),
+                    "declared_digest": declared_digest,
                     "applied_digest": live.digest if live else "",
                     "limits": spec.limits.to_dict(),
                     "approval_required_for": list(spec.approval.required_for),
@@ -182,3 +204,153 @@ class ControlAPI:
         if view is None:
             return _error(404, f"no task {task_id!r}")
         return Response(200, {"task": view.to_dict()})
+
+    # -- governance -----------------------------------------------------------
+
+    def policy(self) -> Response:
+        """The tenant policy and what it compiles to per agent.
+
+        A security reviewer reads this to answer "what can this agent actually do?"
+        without reading YAML across several files or trusting a summary.
+        """
+        if self.bundle.policy is None:
+            return Response(
+                200,
+                {
+                    "declared": False,
+                    "enforced": False,
+                    "detail": (
+                        "no policy.yaml in this tenant bundle; agents run with no "
+                        "platform-level restrictions"
+                    ),
+                    "actions": {},
+                    "permissions": {},
+                    "agents": [],
+                },
+            )
+
+        enforced = self.runtime.capabilities.policy_enforcement
+        agents = []
+        for spec in self.bundle.agents:
+            compiled = compile_policy(spec, self.bundle.policy)
+            agents.append(
+                {
+                    "id": spec.id,
+                    "display_name": self.bundle.identity.display_name_for(spec.id, spec.name),
+                    "allow": compiled.document["allow"],
+                    "deny": compiled.document["deny"],
+                    "approval_actions": sorted(compiled.document["approval_actions"]),
+                    "unlisted_tool": compiled.document["unlisted_tool"],
+                    "has_allowlist": compiled.has_allowlist,
+                    "warnings": list(compiled.warnings),
+                }
+            )
+
+        return Response(
+            200,
+            {
+                "declared": True,
+                "enforced": enforced,
+                "detail": (
+                    ""
+                    if enforced
+                    else f"runtime {self.runtime.name!r} cannot enforce policy; these rules are inert"
+                ),
+                "actions": {
+                    name: action.to_dict()
+                    for name, action in sorted(self.bundle.policy.actions.items())
+                },
+                "permissions": {
+                    name: permission.to_dict()
+                    for name, permission in sorted(self.bundle.policy.permissions.items())
+                },
+                "baseline_tools": list(self.bundle.policy.baseline_tools),
+                "agents": agents,
+            },
+        )
+
+    def simulate(self, query: Mapping[str, str]) -> Response:
+        """Explain what policy would do for one agent and one tool.
+
+        Answers the question a customer's security team actually asks — "what happens if
+        this agent calls that?" — using the same decision function the runtime enforces
+        with, so the answer cannot drift from the behaviour.
+        """
+        agent_id = (query.get("agent") or "").strip()
+        tool = (query.get("tool") or "").strip()
+        if not agent_id or not tool:
+            return _error(400, "both 'agent' and 'tool' are required")
+
+        known = {spec.id for spec in self.bundle.agents}
+        if agent_id not in known:
+            return _error(404, f"no agent {agent_id!r}", known_agents=sorted(known))
+
+        compiled = self._compiled(agent_id)
+        if compiled is None:
+            return Response(
+                200,
+                {
+                    "agent": agent_id,
+                    "tool": tool,
+                    "decision": {
+                        "effect": "allow",
+                        "reason": "no policy is declared for this tenant",
+                        "tool": tool,
+                        "action": "",
+                        "rule": "no-policy",
+                    },
+                    "enforced": False,
+                },
+            )
+
+        decision = decide(compiled.document, tool)
+        return Response(
+            200,
+            {
+                "agent": agent_id,
+                "tool": tool,
+                "decision": decision.to_dict(),
+                "enforced": self.runtime.capabilities.policy_enforcement,
+            },
+        )
+
+    def decisions(self, query: Mapping[str, str]) -> Response:
+        """Refusals and escalations the runtime has recorded.
+
+        Permitted calls are deliberately absent: they are the overwhelming majority, and
+        including them would bury what a reviewer is looking for.
+        """
+        try:
+            limit = int(query.get("limit") or 100)
+        except ValueError:
+            return _error(400, "limit must be a whole number")
+        if limit < 1:
+            return _error(400, "limit must be at least 1")
+
+        if self.audit is None:
+            return Response(
+                200,
+                {"decisions": [], "detail": "no audit log is attached to this control plane"},
+            )
+
+        agent_id = (query.get("agent") or "").strip()
+        rows = [
+            {
+                "ts": event.ts,
+                "agent_id": event.subject,
+                "tool": event.detail.get("tool", ""),
+                "effect": event.detail.get("effect", ""),
+                "reason": event.detail.get("reason", ""),
+                "rule": event.detail.get("rule", ""),
+                "action": event.detail.get("action", ""),
+                "correlation_id": event.correlation_id,
+            }
+            for event in self.audit.read()
+            if event.kind == "policy.decision"
+            and (not agent_id or event.subject == agent_id)
+        ]
+        rows.reverse()  # newest first
+        counts: dict[str, int] = {}
+        for row in rows:
+            counts[row["effect"]] = counts.get(row["effect"], 0) + 1
+        return Response(200, {"decisions": rows[:limit], "counts": counts, "total": len(rows)})
