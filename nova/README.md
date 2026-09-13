@@ -17,6 +17,7 @@ the authoritative boundary definition.
 | `docs/platform/PHASE_2.md` | Policy and governance: how enforcement works, and what it cannot yet express |
 | `docs/platform/PHASE_3.md` | Budget controls: what is enforced, what is only observed, and why |
 | `docs/platform/BUDGET_ENFORCEMENT_AUDIT.md` | What the runtime exposes for usage and limits, and which of it is enforceable |
+| `docs/platform/KNOWLEDGE_CAPABILITY_AUDIT.md` | What exists for knowledge, retrieval and documents; what to reuse versus build |
 | `docs/platform/CORE_PATCHES.md` | The patch budget — every upstream file touched, and why |
 | `docs/platform/HERMES_PLATFORM_AUDIT.md` | Phase 0 assessment of the existing runtime |
 | `docs/platform/BRAND_SURFACE_AUDIT.md` | All 101,368 product-name occurrences, classified |
