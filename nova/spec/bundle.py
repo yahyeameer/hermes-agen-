@@ -29,6 +29,7 @@ import yaml
 
 from nova.errors import SpecError
 from nova.knowledge.sources import KnowledgeCatalog, load_catalog
+from nova.channels.spec import check_agents_exist, load_channels
 from nova.spec.deployment import DeploymentSpec, load_deployment
 from nova.spec.objective import ObjectiveSpec, load_objectives
 from nova.spec.agent import AgentSpec
@@ -75,6 +76,9 @@ class TenantBundle:
     #: Operator-owned deployment settings: where models live and which variable holds each
     #: credential. Never the credential itself.
     deployment: DeploymentSpec = field(default_factory=DeploymentSpec)
+    #: Connected communication channels. Empty means the workforce is reachable only through
+    #: NOVA itself, which is the default and the safe one.
+    channels: tuple = ()
 
     @property
     def tenant_id(self) -> str:
@@ -109,6 +113,7 @@ class TenantBundle:
                 "knowledge": self.knowledge.to_dict(),
                 "objectives": [spec.to_dict() for spec in self.objectives],
                 "deployment": self.deployment.to_dict(),
+                "channels": [c.to_dict() for c in self.channels],
                 "agents": [spec.to_dict() for spec in sorted(self.agents, key=lambda s: s.id)],
             },
             sort_keys=True,
@@ -126,6 +131,7 @@ class TenantBundle:
             "knowledge": self.knowledge.to_dict(),
             "objectives": [spec.to_dict() for spec in self.objectives],
             "deployment": self.deployment.to_dict(),
+            "channels": [c.to_dict() for c in self.channels],
             "agents": [spec.to_dict() for spec in self.agents],
         }
 
@@ -161,6 +167,7 @@ def load_bundle(root: Path | str, *, env: Optional[Mapping[str, str]] = None) ->
     knowledge = load_catalog(root, env=env)
     objectives = load_objectives(root, env=env)
     deployment = load_deployment(root, env=env)
+    channels = load_channels(root, env=env)
 
     agents = _load_agents(root, env=env)
     _check_cross_references(agents, identity)
@@ -169,6 +176,9 @@ def load_bundle(root: Path | str, *, env: Optional[Mapping[str, str]] = None) ->
         _check_policy_references(agents, policy)
 
     _check_objective_references(agents, objectives)
+    # A channel granting an agent this bundle does not contain is almost always a rename
+    # that left the grant behind — and a grant with nobody to use it survives review.
+    check_agents_exist(channels, [spec.id for spec in agents])
 
     return TenantBundle(
         root=root,
@@ -179,6 +189,7 @@ def load_bundle(root: Path | str, *, env: Optional[Mapping[str, str]] = None) ->
         knowledge=knowledge,
         objectives=objectives,
         deployment=deployment,
+        channels=channels,
     )
 
 

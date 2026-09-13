@@ -392,6 +392,106 @@ function renderKnowledge(knowledge) {
   }
 }
 
+/* Channels.
+
+   The product idea this renders is that a customer is not buying "integrations" — they are
+   connecting the places they already talk to the workforce they already have. So the column
+   that matters is WHO an inbound message reaches, not which protocol carried it, and it sits
+   next to the channel rather than a click away.
+
+   Two things are shown that a vendor dashboard would normally hide. A channel that still
+   needs a credential says which VARIABLE is missing and for which agent, because the person
+   reading this is the person who has to go and set it. And every provider carries how its
+   support was established — a tick that means "a plugin directory exists" is the tick a
+   customer signs a contract on, so the evidence travels with the claim. */
+const CHANNEL_STATUS_TONE = {
+  connected: "good",
+  needs_credentials: "warn",
+  disabled: null,
+};
+
+function renderChannels(data) {
+  const target = document.getElementById("channels");
+  const count = document.getElementById("channel-count");
+  target.replaceChildren();
+
+  const channels = data.channels || [];
+  count.textContent = channels.length ? plural(channels.length, "channel") : "none connected";
+
+  if (!data.channel_delivery) {
+    target.appendChild(
+      emptyState(
+        "This runtime cannot deliver channels",
+        "A declared channel would be carried and never delivered, so none are offered."
+      )
+    );
+    return;
+  }
+
+  if (!channels.length) {
+    const known = (data.catalogue || []).map((p) => p.label).join(", ");
+    target.appendChild(
+      emptyState(
+        "No channels connected",
+        `The workforce is reachable only through NOVA itself. Available: ${known}.`
+      )
+    );
+    return;
+  }
+
+  const rows = channels.map((channel) => {
+    const what = el("td");
+    what.appendChild(el("div", "name", channel.display_name || channel.id));
+    const sub = [channel.provider_label, channel.transport];
+    if (channel.needs_public_endpoint) sub.push("needs a public HTTPS endpoint");
+    what.appendChild(el("div", "sub", sub.join(" · ")));
+
+    const state = el("td");
+    state.appendChild(
+      pill(channel.status.replace(/_/g, " "), CHANNEL_STATUS_TONE[channel.status] || null)
+    );
+    /* Support evidence, beside the status rather than in a footnote. */
+    if (channel.verification && channel.verification !== "field_validated") {
+      state.appendChild(el("div", "sub", channel.verification.replace(/_/g, " ")));
+    }
+
+    /* The grant. A connection may reach exactly these agents and no others, whatever a
+       route says — so it is a column, not a detail. */
+    const workers = el("td");
+    const allowed = channel.allowed_agents || [];
+    workers.appendChild(el("div", "id", allowed.length ? allowed.join(", ") : "nobody"));
+    const routes = channel.routes || [];
+    if (routes.length) {
+      workers.appendChild(
+        el("div", "sub", routes.map((r) => `${r.conversation || r.workspace || "everything else"} → ${r.agent}`).join("  ·  "))
+      );
+    } else {
+      workers.appendChild(el("div", "sub", "no routes — inbound falls to the runtime default"));
+    }
+
+    const needs = el("td");
+    const missing = channel.missing_by_agent || {};
+    const outstanding = Object.entries(missing).filter(([, names]) => (names || []).length);
+    if (!outstanding.length) {
+      needs.appendChild(el("div", "sub", "nothing outstanding"));
+    } else {
+      for (const [agent, names] of outstanding) {
+        needs.appendChild(el("div", "sub", `${agent}: ${names.join(", ")}`));
+      }
+    }
+
+    return [what, state, workers, needs];
+  });
+
+  target.appendChild(
+    table(["Channel", "Status", "Workers it may reach", "Credentials still needed"], rows)
+  );
+
+  /* A caveat a customer should meet before a deployment, not during one. */
+  const caveats = channels.filter((c) => c.caveat).map((c) => `${c.provider_label}: ${c.caveat}`);
+  if (caveats.length) showBanner(caveats.join("  |  "), "neutral");
+}
+
 function renderControls(budget) {
   const target = document.getElementById("controls");
   target.replaceChildren();
@@ -660,6 +760,7 @@ async function boot() {
   await Promise.all([
     panel("/objectives", renderObjectives, "Objectives"),
     panel("/knowledge", renderKnowledge, "Knowledge"),
+    panel("/channels", renderChannels, "Channels"),
     panel("/policy", renderPolicy, "Governance").then((state) => {
       if (state === "forbidden") renderForbidden("policy", "policy-count", "Governance");
     }),

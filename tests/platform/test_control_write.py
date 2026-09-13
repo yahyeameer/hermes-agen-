@@ -37,9 +37,19 @@ class RecordingRuntime:
     def __init__(self, *, applied=True, capable=True):
         from nova.runtime.base import RuntimeCapabilities
 
-        self.capabilities = RuntimeCapabilities(work_decisions=capable, work_submission=True)
+        self.capabilities = RuntimeCapabilities(
+            work_decisions=capable, work_submission=True, channel_delivery=False
+        )
         self.calls: list[dict] = []
         self._applied = applied
+
+    def channel_readiness(self, channels):
+        return [
+            {"id": c.id, "provider": c.provider, "required_env": list(c.required_env),
+             "missing_by_agent": {a: list(c.required_env) for a in c.allowed_agents},
+             "ready": False}
+            for c in channels
+        ]
 
     def decide_work(self, task_id, action, *, actor, audit, correlation_id, reason="", note=""):
         self.calls.append(
@@ -318,3 +328,37 @@ def test_a_remote_caller_without_a_token_cannot_write(bundle, audit_log, tmp_pat
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+# -- channels ----------------------------------------------------------------
+
+
+def test_a_viewer_may_read_channels_but_not_apply_them(bundle, audit_log):
+    """Reading what is connected is operational state and contains no credential. Making the
+    runtime start delivering is a different permission, which is why the tables are separate."""
+    from nova.control.auth import ROUTE_ROLES, WRITE_ROUTES
+
+    assert ROUTE_ROLES["/channels"] == "viewer"
+    assert WRITE_ROUTES["/channels/apply"] == "admin"
+
+    api = ControlAPI(bundle, RecordingRuntime(), audit=audit_log)
+    assert api.write("/platform/v1/channels/apply", VIEWER, {}).status == 403
+
+
+def test_the_channels_read_route_never_returns_a_credential(bundle, audit_log):
+    """A control plane must be able to say a channel needs SLACK_BOT_TOKEN and must never be
+    able to say what it is."""
+    import json
+
+    api = ControlAPI(bundle, RecordingRuntime(), audit=audit_log)
+    body = json.dumps(api.handle("/platform/v1/channels").body).lower()
+    for marker in ("xoxb-", "xapp-", "bearer ", "secret_value"):
+        assert marker not in body
+
+
+def test_applying_channels_on_a_runtime_that_cannot_deliver_is_501(bundle, audit_log):
+    """A connected-looking channel that silently goes nowhere is the worst failure this
+    layer has, so the control plane refuses rather than offering the button."""
+    api = ControlAPI(bundle, RecordingRuntime(), audit=audit_log)
+    response = api.write("/platform/v1/channels/apply", ADMIN, {})
+    assert response.status == 501

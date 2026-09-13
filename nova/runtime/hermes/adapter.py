@@ -29,6 +29,7 @@ from nova.runtime.base import (
 from nova.runtime.hermes import materialize as _materialize
 from nova.runtime.hermes import submit as _submit
 from nova.runtime.hermes import decide as _decide
+from nova.runtime.hermes import channels as _channels
 from nova.runtime.hermes import readiness as _readiness
 from nova.runtime.hermes import provider as _provider
 from nova.runtime.hermes import compat as _compat
@@ -59,6 +60,10 @@ from nova.spec import AgentSpec, IdentitySpec
 #: ``policy_enforcement`` is True: policy compiles to a plugin on the runtime's documented
 #: pre-tool-call hook, which vetoes a call or escalates it to the same human gate that
 #: guards dangerous shell commands — and that gate fails closed with no human present.
+#: ``channel_delivery`` is True: the runtime ships 22 messaging platform adapters behind a
+#: documented plugin seam, routes a conversation to a profile through ``gateway.profile_routes``,
+#: and refuses a route whose target profile it does not serve. NOVA compiles its declaration
+#: into that configuration and writes no adapter, no transport and no protocol code.
 #: ``work_decisions`` is True: the runtime already has a review gate and an operator
 #: promotion path (``request_changes``, ``promote_task``, ``unblock_task``, ``add_comment``),
 #: each with its own state machine and its own event rows. NOVA asks for a transition and
@@ -74,6 +79,7 @@ HERMES_CAPABILITIES = RuntimeCapabilities(
     work_submission=True,
     policy_enforcement=True,
     work_decisions=True,
+    channel_delivery=True,
     brand_projection=True,
 )
 
@@ -247,6 +253,43 @@ class HermesRuntime(AgentRuntime):
             detail={**detail, **decision.to_dict()},
         )
         return decision
+
+    def apply_channels(
+        self,
+        channels: Sequence[Any],
+        *,
+        audit: AuditLog,
+        correlation_id: str,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        detail = {
+            "runtime": self.name,
+            "connections": len(channels),
+            "providers": sorted({c.provider for c in channels}),
+            "agents_granted": sorted({a for c in channels for a in c.allowed_agents}),
+        }
+        if dry_run:
+            plan = _channels.plan(channels)
+            audit.record(
+                "channel.plan",
+                correlation_id=correlation_id,
+                subject=self.tenant_id,
+                detail={**detail, **plan.to_dict()},
+            )
+            return plan.to_dict()
+
+        with audit.model_visible_change(
+            "channel.connected",
+            correlation_id=correlation_id,
+            subject=self.tenant_id,
+            detail=detail,
+        ) as outcome:
+            plan = _channels.apply(self.paths.home, channels, dry_run=False)
+            outcome.update(plan.to_dict())
+        return plan.to_dict()
+
+    def channel_readiness(self, channels: Sequence[Any]) -> list[dict[str, Any]]:
+        return _channels.readiness(channels, home=self.paths.home)
 
     def never_archive(self) -> tuple[str, ...]:
         """The runtime's own state, taken from the list the materializer already refuses

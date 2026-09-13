@@ -200,6 +200,24 @@ def _build_parser() -> argparse.ArgumentParser:
 
     audit_status = audit_sub.add_parser("status", help="size, segments and retention")
 
+    channels_cmd = sub.add_parser("channels", help="the customer's connected channels")
+    channels_sub = channels_cmd.add_subparsers(dest="channels_command", required=True)
+
+    ch_list = channels_sub.add_parser("list", help="what is connected and who it reaches")
+    ch_list.add_argument("bundle", type=Path)
+    ch_list.add_argument("--json", action="store_true")
+
+    ch_plan = channels_sub.add_parser("plan", help="what connecting would change, writing nothing")
+    ch_plan.add_argument("bundle", type=Path)
+    ch_plan.add_argument("--json", action="store_true")
+
+    ch_apply = channels_sub.add_parser("apply", help="make the runtime deliver declared channels")
+    ch_apply.add_argument("bundle", type=Path)
+    ch_apply.add_argument("--actor", default="", help="who is connecting (default: $USER)")
+
+    ch_providers = channels_sub.add_parser("providers", help="channels NOVA offers, and the evidence")
+    ch_providers.add_argument("--json", action="store_true")
+
     work_cmd = sub.add_parser("work", help="act on work already on the board")
     work_sub = work_cmd.add_subparsers(dest="work_command", required=True)
 
@@ -714,6 +732,93 @@ def _knowledge(args) -> int:
     return 0
 
 
+def _channels(args) -> int:
+    """``nova channels`` — the customer's channels, without a browser."""
+    import getpass
+
+    from nova.audit import new_correlation_id
+    from nova.channels.providers import PROVIDERS
+
+    if args.channels_command == "providers":
+        if args.json:
+            print(json.dumps([p.to_dict() for p in PROVIDERS], indent=2))
+            return 0
+        print(f"{'PROVIDER':12} {'TRANSPORT':10} {'EVIDENCE':16} CREDENTIALS")
+        for provider in PROVIDERS:
+            env = ", ".join(provider.required_env) or "(none)"
+            print(f"  {provider.id:10} {provider.transport.value:10} "
+                  f"{provider.verification.value:16} {env}")
+        print(
+            "\nEvidence is how the claim was established. Everything reads 'source_read' "
+            "until somebody connects a real provider — a tick that means 'a plugin exists' "
+            "is the tick a customer signs a contract on."
+        )
+        return 0
+
+    bundle = load_bundle(args.bundle)
+    runtime = get_runtime(args.runtime, home=args.home, tenant_id=bundle.tenant_id)
+
+    if args.channels_command == "list":
+        rows = runtime.channel_readiness(bundle.channels)
+        if args.json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        if not bundle.channels:
+            print(f"{bundle.tenant_id}: no channels declared — the workforce is reachable "
+                  "only through NOVA itself")
+            return 0
+        by_id = {row["id"]: row for row in rows}
+        print(f"{bundle.tenant_id}: connected channels")
+        for channel in bundle.channels:
+            row = by_id.get(channel.id, {})
+            state = "connected" if row.get("ready") else "needs credentials"
+            if not channel.enabled:
+                state = "disabled"
+            print(f"\n  {channel.display_name or channel.id}  ({channel.provider})  —  {state}")
+            print(f"    may reach: {', '.join(channel.allowed_agents)}")
+            for route in channel.routes:
+                where = route.conversation or route.workspace or "everything else"
+                print(f"    {where:28} -> {route.agent}")
+            for agent, missing in sorted((row.get("missing_by_agent") or {}).items()):
+                if missing:
+                    print(f"    {agent} still needs: {', '.join(missing)}")
+        return 0
+
+    if args.channels_command == "plan":
+        result = runtime.apply_channels(
+            bundle.channels, audit=NullAuditLog(), correlation_id=new_correlation_id(),
+            dry_run=True,
+        )
+        if args.json:
+            print(json.dumps(result, indent=2))
+            return 0
+        print(f"{bundle.tenant_id}: {len(result['routes'])} route(s) would be compiled")
+        for route in result["routes"]:
+            where = route.get("chat_id") or route.get("guild_id") or "(catch-all)"
+            print(f"  {route['platform']:12} {where:24} -> {route['profile']}")
+        print(f"  agents served: {', '.join(result['served_agents']) or '(none)'}")
+        for warning in result["warnings"]:
+            print(f"  warning:  {warning}")
+        print("\nNothing was written. Re-run `nova channels apply` to apply.")
+        return 0
+
+    actor = args.actor or (getpass.getuser() if hasattr(getpass, "getuser") else "")
+    if not actor:
+        print("error: could not determine who is connecting; pass --actor", file=sys.stderr)
+        return 1
+    audit = AuditLog.for_home(runtime.state_location, tenant_id=bundle.tenant_id, actor=actor)
+    result = runtime.apply_channels(
+        bundle.channels, audit=audit, correlation_id=new_correlation_id()
+    )
+    print(f"connected {len(bundle.channels)} channel(s), "
+          f"{len(result['routes'])} route(s)   (by {actor})")
+    for warning in result["warnings"]:
+        print(f"  warning:  {warning}")
+    print(f"  agents served: {', '.join(result['served_agents']) or '(none)'}")
+    print("\nThe gateway reads this at start. Restart it to pick up the change.")
+    return 0
+
+
 #: How the CLI names a decision the operator asked for.
 _WORK_ACTIONS = {"release": "release", "resume": "resume", "reject": "reject", "note": "annotate"}
 
@@ -900,6 +1005,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
         if args.command == "doctor":
             return _doctor(args)
+
+        if args.command == "channels":
+            return _channels(args)
 
         if args.command == "work":
             return _work(args)

@@ -117,6 +117,10 @@ def test_orphaned_agent_warns_but_is_never_deleted(tmp_path, runtime, audit, hom
     # The example objective is owned by operations; an objective naming a deleted agent is
     # its own (correctly reported) error, and this test is about orphaned profiles.
     shutil.rmtree(reduced / "objectives")
+    # Same reasoning for the example channel, which grants operations: a channel still
+    # reaching a deleted agent is refused at load, which is its own correct error and is
+    # covered in test_channels.py.
+    (reduced / "channels.yaml").unlink()
     report = apply_bundle(load_bundle(reduced), runtime, audit=audit)
     assert any("no longer in the bundle" in w for w in report.warnings)
     assert HermesPaths(home=home).profile_dir("operations").exists()

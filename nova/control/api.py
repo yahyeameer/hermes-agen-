@@ -56,8 +56,14 @@ def _write_route(tail: str) -> Optional[str]:
     prefix, so a path that merely starts the right way cannot borrow the permission.
     """
     parts = [part for part in tail.split("/") if part]
+    # Item-level: /work/<id>/decide, /objectives/<id>/submit
     if len(parts) == 3 and parts[0] in ("work", "objectives"):
         return f"/{parts[0]}/{parts[2]}"
+    # Collection-level: /channels/apply. Applying channels is one act over the whole
+    # declaration — routes are compiled together, and a per-connection apply would leave
+    # the runtime holding half of a routing table.
+    if len(parts) == 2 and parts[0] == "channels":
+        return f"/{parts[0]}/{parts[1]}"
     return None
 
 
@@ -117,6 +123,8 @@ class ControlAPI:
 
         if route == "/work/decide":
             return self._decide_work(tail, principal, payload)
+        if route == "/channels/apply":
+            return self._apply_channels(principal, payload)
         return self._submit_objective(tail, principal, payload)
 
     def _decide_work(self, tail: str, principal, payload: Mapping[str, Any]) -> Response:
@@ -178,6 +186,22 @@ class ControlAPI:
         body = {**report.to_dict(), "actor": principal.name, "dry_run": dry_run}
         return Response(200 if report.submitted or dry_run else 409, body)
 
+    def _apply_channels(self, principal, payload: Mapping[str, Any]) -> Response:
+        if not self.runtime.capabilities.channel_delivery:
+            return _error(
+                501,
+                f"runtime {self.runtime.name!r} cannot deliver channels, so this control "
+                "plane will not offer a connect button that does nothing",
+            )
+        dry_run = bool(payload.get("dry_run"))
+        result = self.runtime.apply_channels(
+            self.bundle.channels,
+            audit=self.audit.with_actor(principal.name),
+            correlation_id=new_correlation_id(),
+            dry_run=dry_run,
+        )
+        return Response(200, {**result, "actor": principal.name, "dry_run": dry_run})
+
     def _compiled(self, agent_id: str):
         """The compiled policy for one agent, or None when no policy is declared."""
         if self.bundle.policy is None:
@@ -216,9 +240,58 @@ class ControlAPI:
             return self.knowledge()
         if tail == "/objectives":
             return self.objectives()
+        if tail == "/channels":
+            return self.channels()
         return _error(404, f"no such route: {path}")
 
     # -- routes ---------------------------------------------------------------
+
+    def channels(self) -> Response:
+        """What is connected, which agents each connection may reach, and what it still needs.
+
+        Carries **no credential and no credential value** — only the variable names the
+        provider's adapter reads, and which of them are still absent per agent. That is the
+        most a control plane should ever be able to say about a secret.
+        """
+        from nova.channels.providers import PROVIDERS
+
+        readiness = {
+            row["id"]: row for row in self.runtime.channel_readiness(self.bundle.channels)
+        }
+        rows = []
+        for channel in self.bundle.channels:
+            ready = readiness.get(channel.id, {})
+            provider = channel.catalogue
+            rows.append(
+                {
+                    "id": channel.id,
+                    "provider": channel.provider,
+                    "provider_label": provider.label,
+                    "display_name": channel.display_name or provider.label,
+                    "enabled": channel.enabled,
+                    "transport": provider.transport.value,
+                    "needs_public_endpoint": provider.needs_public_endpoint,
+                    "verification": provider.verification.value,
+                    "caveat": provider.caveat,
+                    "allowed_agents": list(channel.allowed_agents),
+                    "routes": [route.to_dict() for route in channel.routes],
+                    "required_env": ready.get("required_env", list(provider.required_env)),
+                    "missing_by_agent": ready.get("missing_by_agent", {}),
+                    "status": (
+                        "disabled" if not channel.enabled
+                        else "connected" if ready.get("ready") else "needs_credentials"
+                    ),
+                }
+            )
+        return Response(
+            200,
+            {
+                "declared": bool(self.bundle.channels),
+                "channel_delivery": self.runtime.capabilities.channel_delivery,
+                "channels": rows,
+                "catalogue": [p.to_dict() for p in PROVIDERS],
+            },
+        )
 
     def health(self) -> Response:
         """Platform and runtime health. Never 503 for an absent work store — that is normal."""

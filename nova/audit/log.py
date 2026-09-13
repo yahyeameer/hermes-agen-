@@ -51,6 +51,10 @@ MODEL_VISIBLE_KINDS: frozenset[str] = frozenset(
         # rejecting or resuming an item changes *when* a worker runs rather than *what it
         # reads*, so those are recorded rather than write-ahead — see `AgentRuntime.decide_work`.
         "work.annotated",
+        # Connecting a channel makes an external conversation the text a worker reads. That
+        # is model-visible in the most direct sense there is, and the write-ahead record is
+        # what answers "when did this channel start reaching that agent" after the fact.
+        "channel.connected",
     }
 )
 

@@ -50,6 +50,9 @@ ROUTE_ROLES: Mapping[str, str] = {
     "/tasks": "viewer",
     "/objectives": "viewer",
     "/knowledge": "viewer",
+    # What is connected and which agents it may reach. Readable by a viewer: it is
+    # operational state, and it contains no credential — only variable names.
+    "/channels": "viewer",
     # Governance surfaces. What an agent may do, what it was refused, and what it spent are
     # the questions an attacker asks first and an auditor asks legitimately — same data,
     # different principal.
@@ -72,6 +75,8 @@ WRITE_ROUTES: Mapping[str, str] = {
     "/work/decide": "admin",
     # Putting a declared objective's steps on the board.
     "/objectives/submit": "admin",
+    # Making the runtime deliver declared conversations to granted agents.
+    "/channels/apply": "admin",
 }
 
 #: The file, inside the runtime home, that lists who may call the control plane.

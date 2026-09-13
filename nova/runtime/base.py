@@ -78,6 +78,10 @@ class RuntimeCapabilities:
     #: resume it, or leave a note a worker will read. False means the control plane stays
     #: read-only, because an approval nobody can act on is a button that lies.
     work_decisions: bool = False
+    #: External communication channels can be connected, and inbound conversations routed to
+    #: named agents. False means a declared channel would be carried and never delivered,
+    #: which is worse than not offering channels at all.
+    channel_delivery: bool = False
     #: Branding can be projected into the runtime's own display surfaces.
     brand_projection: bool = False
 
@@ -649,6 +653,45 @@ class AgentRuntime(ABC):
             f"runtime {self.name!r} cannot act on work items "
             "(capabilities.work_decisions is False)"
         )
+
+    def apply_channels(
+        self,
+        channels: Sequence[Any],
+        *,
+        audit: AuditLog,
+        correlation_id: str,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Make the runtime deliver declared conversations to the agents that were granted.
+
+        Connecting a channel is **model-visible in the most direct sense there is**: an
+        inbound message becomes the text a worker reads, exactly as a work item's body does.
+        So an implementation routes this through ``audit.model_visible_change``, and the
+        write-ahead record is what lets an operator answer "when did this channel start
+        reaching that agent" after the fact.
+
+        An implementation must compile the declared grant into whatever the runtime uses to
+        decide which agents it serves, so that a route escaping validation still cannot
+        deliver. NOVA's parser refusing is the first gate; the runtime refusing is the one
+        that holds when somebody edits configuration by hand.
+
+        The default refuses. A runtime that cannot deliver a channel must not accept a
+        declaration and drop it — a connected-looking channel that silently goes nowhere is
+        the worst failure this layer has.
+        """
+        raise RuntimeAdapterError(
+            f"runtime {self.name!r} cannot deliver channels "
+            "(capabilities.channel_delivery is False)"
+        )
+
+    def channel_readiness(self, channels: Sequence[Any]) -> list[dict[str, Any]]:
+        """Which credential variables each connection still needs, per granted agent.
+
+        Names, never values — the same rule the model-provider seam runs on. A connection
+        whose credential is absent is not broken configuration; it is configuration waiting
+        for the operator step NOVA deliberately cannot take on their behalf.
+        """
+        return []
 
     @abstractmethod
     def usage(self, agent_id: str) -> UsageSummary:

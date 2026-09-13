@@ -169,6 +169,11 @@ Rules:
    submission, each asking the runtime for a transition it already owns rather than writing
    a status — a control plane that can write any state can write an inconsistent one.
 4. The Hermes dashboard and CLI stay, bound to localhost, for engineering and debugging.
+   *Channels follow the same rule* (Phase 9): the runtime's 22 platform adapters, its webhook
+   verification and its delivery ledger stay exactly where they are, and NOVA compiles a
+   customer-facing declaration into the gateway configuration they already read. All of
+   NOVA's runtime-specific channel knowledge lives in one module,
+   `nova/runtime/hermes/channels.py`; `nova/channels/` contains no runtime vocabulary.
 5. A future `nova` CLI covers platform and deployment operations only. **Do not re-implement the
    Hermes CLI.**
 
