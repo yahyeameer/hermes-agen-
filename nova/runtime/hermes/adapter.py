@@ -498,6 +498,33 @@ class HermesRuntime(AgentRuntime):
             profile, agent_id, automation_id, enabled=enabled, reason=reason,
         )
 
+    def validate_schedule(self, schedule: str) -> None:
+        from nova.runtime.hermes import automations as _automations
+
+        _automations.validate_schedule(schedule)
+
+    def create_automation(self, agent_id: str, compiled):
+        """Write a compiled automation into the owning agent's cron store.
+
+        Takes a :class:`~nova.automations.compile.CompiledAutomation`, never a raw
+        prompt: the compiler is the only path to the scheduler, and a method that
+        accepted free text would reopen the hole Phase 11 left deliberately closed.
+        """
+        from nova.runtime.hermes import automations as _automations
+
+        profile = self.paths.profile_dir(agent_id)
+        if not profile.is_dir():
+            return None
+        return _automations.create(profile, agent_id, compiled)
+
+    def delete_automation(self, agent_id: str, automation_id: str) -> bool:
+        from nova.runtime.hermes import automations as _automations
+
+        profile = self.paths.profile_dir(agent_id)
+        if not profile.is_dir():
+            return False
+        return _automations.delete(profile, agent_id, automation_id)
+
     def health(self) -> RuntimeHealth:
         present, detail = _work.store_status(self.paths.home)
         home_exists = self.paths.home.is_dir()

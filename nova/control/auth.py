@@ -81,9 +81,13 @@ WRITE_ROUTES: Mapping[str, str] = {
     "/objectives/submit": "admin",
     # Making the runtime deliver declared conversations to granted agents.
     "/channels/apply": "admin",
-    # Pausing or resuming a schedule the runtime already holds. Admin: stopping a
-    # nightly reconciliation is as consequential as releasing held work.
+    # Pausing, resuming or deleting a schedule the runtime already holds. Admin:
+    # stopping a nightly reconciliation is as consequential as releasing held work.
     "/automations/decide": "admin",
+    # Declaring a new automation. Admin, and it is the heaviest write here: it gives an
+    # agent a standing instruction on a timer. It is only reachable through the
+    # compiler, which refuses anything the owning agent was not already granted.
+    "/automations/create": "admin",
 }
 
 #: Read routes that address ONE member of a collection, e.g. ``/tasks/t_ab12``. Only the

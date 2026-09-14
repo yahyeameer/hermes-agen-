@@ -252,22 +252,45 @@ capabilities:
     name: Creating and deleting automations
     category: automation
     description: >-
-      WITHHELD. create_job/remove_job work, but creating an automation hands an agent a
-      recurring prompt that NOVA never compiled and no policy reviewed, bypassing the
-      spec -> policy -> pre_tool_call chain. Needs automations declared in the tenant
-      bundle first. See docs/audits/PHASE_11_AUTOMATIONS.md section 3.
+      GOVERNED (Phase 12). create_job/remove_job are reachable only through the NOVA
+      automation compiler: an AutomationSpec is validated against the owning agent's
+      grants before the runtime sees it, and create_automation takes a CompiledAutomation
+      rather than a prompt. Declared permissions are a SUBSET check, not a runtime
+      narrowing — the agent's policy remains the ceiling. See
+      docs/audits/PHASE_12_GOVERNED_AUTOMATIONS.md.
     hermes_source: cron/jobs.py
-    hermes_symbol: create_job, remove_job, trigger_job
-    runtime_enforcement: live_proven
-    nova_status: none
+    hermes_symbol: create_job, remove_job
+    runtime_enforcement: tested
+    nova_status: surfaced
+    customer_visible: true
+    customer_editable: true
+    required_role: admin
+    tenant_safe: true
+    audit_required: true
+    core_changes_required: false
+    live_validated: true
+    priority: none
+
+  - id: automations.compiler
+    name: Automation compiler
+    category: governance
+    description: >-
+      The single path from a declaration to the runtime scheduler. Refuses an unknown or
+      disabled agent, permissions/knowledge/channels outside the agent's grant, an
+      unparseable schedule and an unbounded objective. The schedule parser is INJECTED by
+      the adapter, because nova/automations may not name the runtime.
+    hermes_source: nova/automations/compile.py
+    hermes_symbol: compile_automation, CompiledAutomation
+    runtime_enforcement: tested
+    nova_status: surfaced
     customer_visible: false
     customer_editable: false
     required_role: admin
     tenant_safe: true
     audit_required: true
     core_changes_required: false
-    live_validated: false
-    priority: p2
+    live_validated: true
+    priority: none
 
   # ---------------------------------------------------------------- memory
   - id: memory.curated_file

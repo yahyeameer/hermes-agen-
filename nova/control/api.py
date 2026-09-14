@@ -64,16 +64,20 @@ def _write_route(tail: str) -> Optional[str]:
     # the runtime holding half of a routing table.
     if len(parts) == 2 and parts[0] == "channels":
         return f"/{parts[0]}/{parts[1]}"
+    # Collection-level create: POST /automations. Declaring a new governed object is an
+    # act on the collection, not on a member that does not exist yet.
+    if parts == ["automations"]:
+        return "/automations/create"
     return None
 
 
 #: What an administrator may do to an automation the runtime already holds.
 #:
-#: Pause and resume only. They move an existing, declared schedule between two states
-#: the runtime itself defines. Creating one is a different act: it hands an agent an
-#: instruction that NOVA never compiled and no policy reviewed, which is a governance
-#: hole wearing the shape of a feature.
-AUTOMATION_ACTIONS = ("pause", "resume")
+#: Pause and resume move an existing schedule between two states the runtime defines.
+#: Delete removes it. Creating is NOT here: it is a collection-level act that must go
+#: through the compiler (``/automations/create``), because an automation created from a
+#: raw prompt would be an instruction no policy reviewed, running on a timer.
+AUTOMATION_ACTIONS = ("pause", "resume", "delete")
 
 
 def _error(status: int, message: str, **extra: Any) -> Response:
@@ -132,6 +136,8 @@ class ControlAPI:
 
         if route == "/work/decide":
             return self._decide_work(tail, principal, payload)
+        if route == "/automations/create":
+            return self._create_automation(principal, payload)
         if route == "/automations/decide":
             return self._decide_automation(tail, principal, payload)
         if route == "/channels/apply":
@@ -466,6 +472,169 @@ class ControlAPI:
                     "enabled": sum(1 for r in rows if r.enabled),
                     "paused": sum(1 for r in rows if not r.enabled),
                 },
+                # Provenance for the ones NOVA declared. An automation missing from here
+                # was created outside NOVA — shown as that, not given invented origins.
+                "governance": self._automation_governance(rows),
+                # Agents the create form may target. Sent rather than inferred from the
+                # automation list, which would only ever name agents that already have
+                # one.
+                "agents": [
+                    {"id": a.id, "display_name": display.get(a.id, a.id)}
+                    for a in self.bundle.agents
+                    if a.enabled
+                ],
+            },
+        )
+
+    def _automation_governance(self, rows) -> dict[str, Any]:
+        """NOVA's record for each listed automation, where one exists."""
+        from nova.automations import registry
+
+        found: dict[str, Any] = {}
+        for row in rows:
+            try:
+                entry = registry.governance(
+                    self.runtime.state_location,
+                    row.automation_id,
+                    tenant_id=self.bundle.tenant_id,
+                )
+            except Exception:  # noqa: BLE001 — provenance is a nicety, not the listing
+                entry = None
+            if entry is not None:
+                found[row.automation_id] = entry
+        return found
+
+    def _forget_automation(self, job_id: str) -> None:
+        """Drop NOVA's provenance record, best effort.
+
+        Best effort on purpose: the runtime is the source of truth for existence, and a
+        registry write that failed must not turn a successful delete into an error the
+        operator has to reconcile.
+        """
+        from nova.automations import registry
+
+        try:
+            registry.forget(self.runtime.state_location, job_id)
+        except Exception:  # noqa: BLE001 — provenance is a record, not the act
+            pass
+
+    def _create_automation(self, principal, payload: Mapping[str, Any]) -> Response:
+        """Declare a new automation: compile it, then let the runtime schedule it.
+
+        The body is an :class:`~nova.spec.automation.AutomationSpec` document — the same
+        shape a bundle file uses — and it goes through the same compiler. There is no
+        path from here to ``cron.jobs.create_job`` that skips that: an automation created
+        from a raw prompt would be a recurring instruction no policy reviewed, which is
+        precisely what Phase 11 refused to build.
+        """
+        from nova.automations.compile import compile_automation
+        from nova.spec.automation import AutomationSpec
+
+        if not self.runtime.capabilities.scheduling:
+            return _error(
+                501,
+                f"runtime {self.runtime.name!r} does not hold scheduled work, so this "
+                "control plane will not offer a button that does nothing",
+            )
+
+        try:
+            spec = AutomationSpec.parse(payload)
+            compiled = compile_automation(
+                spec, self.bundle, validate_schedule=self.runtime.validate_schedule
+            )
+        except NovaError as exc:
+            # 400, not 500: the declaration was refused by validation, and the message
+            # names the automation and the field the way every other spec failure does.
+            return _error(400, str(exc))
+
+        correlation_id = new_correlation_id()
+        audit = self.audit.with_actor(principal.name)
+        audit.record(
+            kind="automation.declared",
+            phase="intent",
+            subject=compiled.agent_id,
+            digest=compiled.digest,
+            correlation_id=correlation_id,
+            detail={
+                "automation_id": spec.id, "title": spec.title, "schedule": spec.schedule,
+                "permissions": list(spec.permissions), "knowledge": list(spec.knowledge),
+                "channels": list(spec.channels), "reason": spec.reason,
+                "actor": principal.name,
+            },
+        )
+        try:
+            created = self.runtime.create_automation(compiled.agent_id, compiled)
+        except Exception as exc:  # noqa: BLE001 — an intent must always reach a terminal phase
+            # Without this, a runtime that raises leaves an ``intent`` row with no
+            # ``committed`` and no ``failed`` beside it, and the log reads as though the
+            # act might have happened. The write-ahead invariant is only worth anything
+            # if every intent is closed.
+            audit.record(
+                kind="automation.declared",
+                phase="failed",
+                subject=compiled.agent_id,
+                digest=compiled.digest,
+                correlation_id=correlation_id,
+                detail={"automation_id": spec.id, "actor": principal.name},
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return _error(
+                502,
+                f"the runtime refused this automation: {exc}",
+                automation_id=spec.id,
+            )
+        if created is None:
+            audit.record(
+                kind="automation.declared",
+                phase="failed",
+                subject=compiled.agent_id,
+                digest=compiled.digest,
+                correlation_id=correlation_id,
+                detail={"automation_id": spec.id, "actor": principal.name},
+            )
+            return Response(
+                409,
+                {
+                    "applied": False, "automation_id": spec.id,
+                    "detail": (
+                        f"the runtime did not create this automation — agent "
+                        f"{compiled.agent_id!r} may not be materialized yet"
+                    ),
+                },
+            )
+
+        from nova.automations import registry
+
+        try:
+            registry.record(
+                self.runtime.state_location,
+                job_id=created.automation_id,
+                tenant_id=self.bundle.tenant_id,
+                compiled=compiled,
+                actor=principal.name,
+                correlation_id=correlation_id,
+                created_at=created.created_at or "",
+            )
+        except Exception:  # noqa: BLE001 — provenance is a record, not the act
+            pass
+
+        audit.record(
+            kind="automation.declared",
+            phase="committed",
+            subject=compiled.agent_id,
+            digest=compiled.digest,
+            correlation_id=correlation_id,
+            detail={
+                "automation_id": spec.id, "runtime_job_id": created.automation_id,
+                "actor": principal.name,
+            },
+        )
+        return Response(
+            201,
+            {
+                "applied": True, "actor": principal.name,
+                "declaration": compiled.to_dict(),
+                "automation": created.to_dict(),
             },
         )
 
@@ -512,7 +681,6 @@ class ControlAPI:
             # does not exist: distinguishing them confirms other tenants' ids.
             return _error(404, f"no automation {automation_id!r}")
 
-        enabled = action == "resume"
         correlation_id = new_correlation_id()
         audit = self.audit.with_actor(principal.name)
         # Written ahead of the act, so an attempt that fails midway is still on the
@@ -528,9 +696,59 @@ class ControlAPI:
                 "reason": reason, "actor": principal.name,
             },
         )
-        updated = self.runtime.set_automation_enabled(
-            owner, automation_id, enabled=enabled, reason=reason,
-        )
+        if action == "delete":
+            try:
+                removed = self.runtime.delete_automation(owner, automation_id)
+            except Exception as exc:  # noqa: BLE001 — close the intent, always
+                audit.record(
+                    kind="automation.decision", phase="failed", subject=owner,
+                    correlation_id=correlation_id,
+                    detail={"automation_id": automation_id, "action": action,
+                            "actor": principal.name},
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+                return _error(502, f"the runtime refused this delete: {exc}")
+            if removed:
+                # Drop NOVA's provenance record too, so the registry does not accumulate
+                # entries for automations the runtime no longer has.
+                self._forget_automation(automation_id)
+            audit.record(
+                kind="automation.decision",
+                phase="committed" if removed else "failed",
+                subject=owner,
+                correlation_id=correlation_id,
+                detail={
+                    "automation_id": automation_id, "action": action,
+                    "actor": principal.name,
+                },
+            )
+            if not removed:
+                return Response(
+                    409,
+                    {
+                        "applied": False, "automation_id": automation_id, "action": action,
+                        "detail": "the runtime did not remove this automation",
+                    },
+                )
+            return Response(
+                200,
+                {"applied": True, "action": action, "actor": principal.name,
+                 "automation_id": automation_id},
+            )
+
+        try:
+            updated = self.runtime.set_automation_enabled(
+                owner, automation_id, enabled=action == "resume", reason=reason,
+            )
+        except Exception as exc:  # noqa: BLE001 — close the intent, always
+            audit.record(
+                kind="automation.decision", phase="failed", subject=owner,
+                correlation_id=correlation_id,
+                detail={"automation_id": automation_id, "action": action,
+                        "actor": principal.name},
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return _error(502, f"the runtime refused this transition: {exc}")
         audit.record(
             kind="automation.decision",
             phase="committed" if updated else "failed",

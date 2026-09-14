@@ -786,6 +786,28 @@ class AgentRuntime(ABC):
             detail=f"runtime {self.name!r} does not report scheduler liveness",
         )
 
+    def validate_schedule(self, schedule: str) -> None:
+        """Raise ``SpecError`` when this runtime would not accept ``schedule``.
+
+        Supplied to the automation compiler, which must not name a runtime itself. A
+        runtime with no scheduler accepts anything here and refuses at create time.
+        """
+        return None
+
+    def create_automation(self, agent_id: str, compiled) -> Optional["AutomationView"]:
+        """Create a runtime job from a **compiled** automation; None when unsupported.
+
+        Deliberately takes a compiled object rather than a prompt and a schedule. A
+        runtime method that accepted free text would let any caller schedule an
+        instruction that no policy reviewed, which is the thing the compiler exists to
+        prevent.
+        """
+        return None
+
+    def delete_automation(self, agent_id: str, automation_id: str) -> bool:
+        """Remove one automation; False when absent or not this agent's."""
+        return False
+
     def set_automation_enabled(
         self, agent_id: str, automation_id: str, *, enabled: bool, reason: str = "",
     ) -> Optional["AutomationView"]:

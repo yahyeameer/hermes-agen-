@@ -271,12 +271,17 @@ def test_pausing_an_automation_is_admin_only():
     assert admin.may_write("/automations/decide")
 
 
-def test_only_pause_and_resume_are_offered():
-    """Creating an automation hands an agent an instruction NOVA never compiled and no
-    policy reviewed. That is a governance decision, not a missing verb."""
+def test_creating_is_not_an_action_on_an_existing_automation():
+    """Phase 12 adds create — but through the compiler, not as a verb here.
+
+    ``/automations/decide`` acts on something the runtime already holds. Creating is a
+    collection-level act with a different route and a different gate, because the thing
+    that makes create safe is compilation, not the verb.
+    """
     from nova.control.api import AUTOMATION_ACTIONS
 
-    assert set(AUTOMATION_ACTIONS) == {"pause", "resume"}
+    assert set(AUTOMATION_ACTIONS) == {"pause", "resume", "delete"}
+    assert "create" not in AUTOMATION_ACTIONS
 
 
 def test_a_decision_writes_an_intent_and_a_commit(tmp_path, agent_a):
@@ -345,7 +350,7 @@ def test_an_unknown_action_is_refused_before_anything_is_written(tmp_path, agent
     response = api._decide_automation(
         f"/automations/{job['id']}/decide",
         Principal(name="alice", role="admin", via="token"),
-        {"action": "delete"},
+        {"action": "sudo-everything"},
     )
     assert response.status == 400
     assert [e for e in audit.read() if e.kind == "automation.decision"] == []

@@ -31,6 +31,7 @@ from nova.errors import SpecError
 from nova.knowledge.sources import KnowledgeCatalog, load_catalog
 from nova.channels.spec import check_agents_exist, load_channels
 from nova.spec.deployment import DeploymentSpec, load_deployment
+from nova.spec.automation import load_automations
 from nova.spec.objective import ObjectiveSpec, load_objectives
 from nova.spec.agent import AgentSpec
 from nova.spec.identity import IdentitySpec
@@ -79,6 +80,9 @@ class TenantBundle:
     #: Connected communication channels. Empty means the workforce is reachable only through
     #: NOVA itself, which is the default and the safe one.
     channels: tuple = ()
+    #: Recurring work, declared so it is reviewable and bounded by its agent's policy.
+    #: Empty is the common case; a tenant with no schedules has none.
+    automations: tuple = ()
 
     @property
     def tenant_id(self) -> str:
@@ -166,6 +170,7 @@ def load_bundle(root: Path | str, *, env: Optional[Mapping[str, str]] = None) ->
 
     knowledge = load_catalog(root, env=env)
     objectives = load_objectives(root, env=env)
+    automations = load_automations(root, env=env)
     deployment = load_deployment(root, env=env)
     channels = load_channels(root, env=env)
 
@@ -180,7 +185,9 @@ def load_bundle(root: Path | str, *, env: Optional[Mapping[str, str]] = None) ->
     # that left the grant behind — and a grant with nobody to use it survives review.
     check_agents_exist(channels, [spec.id for spec in agents])
 
-    return TenantBundle(
+    from nova.automations.compile import check_automation_references
+
+    bundle = TenantBundle(
         root=root,
         organization=organization,
         identity=identity,
@@ -190,7 +197,13 @@ def load_bundle(root: Path | str, *, env: Optional[Mapping[str, str]] = None) ->
         objectives=objectives,
         deployment=deployment,
         channels=channels,
+        automations=automations,
     )
+    # Automations compile against the whole bundle — agent, policy grants, catalog,
+    # channel grants — so this runs last and fails the load rather than letting a
+    # schedule that could never have been granted reach the runtime.
+    check_automation_references(bundle)
+    return bundle
 
 
 def _check_objective_references(

@@ -278,3 +278,45 @@ def set_enabled(
         return None
     runs = _recent_runs(profile_dir, (automation_id,), per_job=5)
     return _to_view(record, agent_id, runs.get(automation_id, ()))
+
+
+def create(profile_dir: Path, agent_id: str, compiled) -> AutomationView:
+    """Create the runtime job for a compiled automation.
+
+    ``job_kwargs`` comes from the compiler and is passed through unchanged — nothing is
+    added here, so what was reviewed is what runs. Schedule parsing, id minting and
+    ``next_run_at`` remain the runtime's.
+    """
+    with _store(profile_dir) as cron_jobs:
+        cron_jobs.ensure_dirs()
+        record = cron_jobs.create_job(**compiled.job_kwargs)
+    return _to_view(record, agent_id, ())
+
+
+def delete(profile_dir: Path, agent_id: str, automation_id: str) -> bool:
+    """Remove one automation. False when this agent does not own it.
+
+    Ownership is re-checked against this agent's own store rather than trusted from a
+    listing the caller may have obtained earlier.
+    """
+    with _store(profile_dir) as cron_jobs:
+        if cron_jobs.get_job(automation_id) is None:
+            return False
+        return bool(cron_jobs.remove_job(automation_id))
+
+
+def validate_schedule(schedule: str):
+    """Parse a schedule phrase with the runtime's own parser, or raise ``SpecError``.
+
+    Lives in the adapter because this is the one package allowed to name the runtime.
+    The compiler takes this as an injected callable, so NOVA never grows a second
+    schedule grammar that could drift from the one that decides when jobs actually run.
+    """
+    from nova.errors import SpecError
+
+    from cron.jobs import parse_schedule
+
+    try:
+        return parse_schedule(schedule)
+    except Exception as exc:  # noqa: BLE001 — the runtime's own message is the useful one
+        raise SpecError(f"schedule {schedule!r} is not valid: {exc}") from None

@@ -92,7 +92,12 @@ already holds, delegated to `pause_job`/`resume_job` so resuming recomputes `nex
 and clears the pause marker — writing `enabled` directly would leave an automation that
 looks active and never fires.
 
-### Why create and delete are not offered
+### Why create and delete are not offered *(superseded by Phase 12)*
+
+> **Update.** Phase 12 implements create and delete, through the design this section
+> asked for: automations are now a first-class spec compiled against the tenant before
+> the runtime sees them. See `PHASE_12_GOVERNED_AUTOMATIONS.md`. The reasoning below is
+> kept because it is why the compiler exists.
 
 Creating an automation means handing an agent a **prompt that NOVA never compiled and no
 policy reviewed**, on a recurring schedule. That is an ungoverned agent instruction: it
@@ -169,8 +174,8 @@ complete even if the ticker ran. Accordingly:
 3. **One-shot vs recurring is not distinguished in the UI.** `schedule.kind` is carried
    through the API (`once`/`cron`/`interval`) but the cards do not yet treat a one-shot
    differently.
-4. **No create/delete** — §3.
-5. **`trigger_job` (run now) is not exposed.** It is a real seam and would be a genuinely
+4. ~~**No create/delete**~~ — **added in Phase 12**, via the compiler described in §3.
+5. **`trigger_job` (run now) is not exposed**, in Phase 11 or 12. It is a real seam and would be a genuinely
    useful admin action, but running an automation on demand executes its prompt
    immediately; it belongs with the create/delete governance design.
 6. **Liveness is inferred from markers, not from the gateway.** If a gateway writes

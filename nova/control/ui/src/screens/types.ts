@@ -121,10 +121,19 @@ export type SchedulerHealth = {
   heartbeat_age_seconds?: number | null; success_age_seconds?: number | null;
   last_error: string; detail: string;
 };
+/** What NOVA recorded when it declared an automation. Absent for automations created
+ *  outside NOVA — shown as exactly that, rather than given invented provenance. */
+export type AutomationGovernance = {
+  declared_by: string; declared_at: string; digest: string; reason: string;
+  permissions: string[]; knowledge: string[]; channels: string[];
+  automation_id: string; tenant_id: string;
+};
 export type AutomationsPayload = {
   scheduling: boolean;
   automations: Automation[];
   detail?: string;
   scheduler_health?: Record<string, SchedulerHealth>;
   counts?: { total: number; enabled: number; paused: number };
+  governance?: Record<string, AutomationGovernance>;
+  agents?: Array<{ id: string; display_name: string }>;
 };
