@@ -32,9 +32,12 @@ tag="${version}-g${sha}"
 # Everything the image actually copies. Untracked files count: a file that is not
 # committed still lands in the layer, so a tag that ignored them would name content that
 # is not in the image.
-image_paths=(nova hermes_cli cron agent tools gateway plugins providers deploy/docker
-             hermes_constants.py hermes_time.py hermes_logging.py utils.py toolsets.py
-             hermes_state.py hermes_state_common.py hermes_state_schema.py)
+# Named file by file rather than as directories where a directory would over-reach:
+# deploy/docker also holds validate-local.sh, which tests the image and is not in it, and a
+# tag that changed when the test changed would be lying about what it identifies.
+image_paths=(nova hermes_cli cron agent tools gateway plugins providers *.py
+             deploy/docker/Dockerfile.nova deploy/docker/entrypoint.sh
+             deploy/docker/healthcheck.py deploy/docker/build.sh .dockerignore)
 
 # Modified tracked files contribute their diff; untracked files contribute their path and
 # a hash of their contents. Listing untracked paths alone was not enough — editing an
