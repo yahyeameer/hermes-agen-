@@ -1,464 +1,288 @@
 import * as React from "react";
-import { motion } from "framer-motion";
 import {
-  Activity, Bot, BookOpen, CircleDollarSign, ListChecks, MessagesSquare,
-  Moon, ShieldCheck, Sun, Target,
+  Activity, Blocks, BookOpen, Boxes, CircleCheck, Gauge, LayoutDashboard,
+  ListChecks, ShieldCheck, Target,
 } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import { Hint, InfoDot, Panel, Row, Stat } from "@/components/bits";
+import { GlassPanel, SectionHeader, StatusPill } from "@/components/glass";
+import { MetricCard, Panel, PanelBody } from "@/components/panel";
+import { Atmosphere, CommandBar, NAV, Sidebar, TopBar } from "@/components/shell";
+import { TooltipProvider } from "@/components/tooltip";
+import { AgentDetail, AgentsScreen } from "@/screens/agents";
+import {
+  ActivityScreen, ApprovalsScreen, ChannelsScreen, KnowledgeScreen,
+  ObjectivesScreen, PoliciesScreen, UsageScreen, WorkScreen,
+} from "@/screens/misc";
+import type {
+  Agent, Budget, Channel, Decision, Health, Identity, KnowledgeSource, Objective, Policy, Task,
+} from "@/screens/types";
 import { plural } from "@/lib/api";
-import { usePanel, useTheme } from "@/lib/hooks";
-import { cn } from "@/lib/utils";
+import { usePanel, useRoute, useTheme } from "@/lib/hooks";
 
-/* Types are the shapes the Control API actually returns. Kept deliberately loose where the
-   API is a passthrough of runtime data: inventing a strict type for something NOVA does not
-   own would break the dashboard on a runtime upgrade rather than degrade it. */
-type Identity = {
-  product_name: string; company_name: string; tenant_id: string;
-  welcome?: string; theme?: { accent?: string };
-  support?: { email?: string; url?: string };
-};
-type Health = {
-  platform: { version: string; tenant_id: string };
-  runtime: Record<string, unknown> & { runtime?: string; healthy?: boolean; detail?: string };
-  bundle: { digest: string; agents: number };
-};
-type Agents = { agents: Array<Record<string, any>> };
-type Tasks = { tasks: Array<Record<string, any>> };
-type Objectives = { declared: boolean; objectives: Array<Record<string, any>>; detail?: string };
-type Knowledge = { retrieval_enabled: boolean; sources: Array<Record<string, any>>; undeclared_in_index?: string[] };
-type Channels = {
-  declared: boolean; channel_delivery: boolean;
-  channels: Array<Record<string, any>>; catalogue: Array<Record<string, any>>;
-};
-type Policy = {
-  declared?: boolean; enforced?: boolean;
-  agents?: Array<Record<string, any>>;
-  actions?: Record<string, { tools?: string[]; description?: string; requires_approval?: boolean }>;
-};
-type Decisions = { decisions: Array<Record<string, any>> };
-type Budget = { agents?: Array<Record<string, any>>; controls?: Array<Record<string, any>>; caveat?: string };
+/** How many agents the Overview samples. Six fills two rows of the three-column preview
+ *  at desktop width without pushing the panels beside it off the fold. */
+const OVERVIEW_AGENTS = 6;
 
-const STATUS_TONE: Record<string, "good" | "warn" | "secondary" | "destructive"> = {
-  connected: "good", running: "good", done: "good", ready: "good",
-  needs_credentials: "warn", review: "warn", blocked: "warn", pending: "secondary",
-  disabled: "secondary", archived: "secondary", failed: "destructive",
+const SCREEN_META: Record<string, { title: string; subtitle: string }> = {
+  overview: { title: "Overview", subtitle: "The state of the whole workforce, at a glance." },
+  agents: { title: "Agents", subtitle: "Every AI worker, what it is doing, and what it may reach." },
+  objectives: { title: "Objectives", subtitle: "Repeatable business processes and how far each has got." },
+  work: { title: "Work", subtitle: "Everything on the board, newest first." },
+  approvals: { title: "Approvals", subtitle: "What is waiting on a person, and what always will be." },
+  activity: { title: "Activity", subtitle: "Every refusal and escalation the policy layer recorded. Permitted calls are not logged." },
+  knowledge: { title: "Knowledge", subtitle: "The documents the workforce may quote, and who may read each." },
+  channels: { title: "Channels", subtitle: "The places customers already talk, wired to the workforce." },
+  policies: { title: "Policies", subtitle: "What each agent is permitted to do, and what is actually enforced." },
+  usage: { title: "Usage", subtitle: "Model usage as reported by the runtime. Observed, never enforced." },
 };
-
-function tone(value: string) {
-  return STATUS_TONE[value] ?? "secondary";
-}
 
 export default function App() {
   const { theme, toggle } = useTheme();
+  const [route, go] = useRoute();
+  const [commandOpen, setCommandOpen] = React.useState(false);
+
   const identity = usePanel<Identity>("/identity", 60000);
   const health = usePanel<Health>("/health");
-  const agents = usePanel<Agents>("/agents");
-  const tasks = usePanel<Tasks>("/tasks?limit=40");
-  const objectives = usePanel<Objectives>("/objectives");
-  const knowledge = usePanel<Knowledge>("/knowledge");
-  const channels = usePanel<Channels>("/channels");
+  const agents = usePanel<{ agents: Agent[] }>("/agents");
+  const tasks = usePanel<{ tasks: Task[]; counts?: Record<string, number> }>("/tasks?limit=200");
+  const objectives = usePanel<{ objectives: Objective[]; detail?: string }>("/objectives");
+  const knowledge = usePanel<{
+    retrieval_enabled: boolean; sources: KnowledgeSource[]; undeclared_in_index?: string[];
+    index_detail?: string; document_extraction?: boolean;
+  }>("/knowledge");
+  const channels = usePanel<{ declared: boolean; channel_delivery: boolean; channels: Channel[]; catalogue: any[] }>("/channels");
   const policy = usePanel<Policy>("/policy");
-  const decisions = usePanel<Decisions>("/decisions?limit=40");
+  const decisions = usePanel<{ decisions: Decision[]; total?: number; counts?: Record<string, number> }>(
+    // total and counts describe the whole log, not this page of it, so the timeline
+    // can say how much it is not showing rather than implying 80 is all there is.
+    "/decisions?limit=80",
+  );
   const budget = usePanel<Budget>("/budget");
 
   const brand = identity.state === "ok" ? identity.data : null;
-  const taskRows = tasks.state === "ok" ? tasks.data.tasks : [];
   const agentRows = agents.state === "ok" ? agents.data.agents : [];
+  const taskRows = tasks.state === "ok" ? tasks.data.tasks : [];
   const channelRows = channels.state === "ok" ? channels.data.channels : [];
+  const knowledgeRows = knowledge.state === "ok" ? knowledge.data.sources : [];
+  const objectiveRows = objectives.state === "ok" ? objectives.data.objectives : [];
+  const decisionRows = decisions.state === "ok" ? decisions.data.decisions : [];
+
+  const attention = taskRows.filter((t) => t.needs_attention);
+  const running = taskRows.filter((t) => ["running", "ready"].includes(String(t.runtime_status)));
+  const connected = channelRows.filter((c) => c.status === "connected");
 
   React.useEffect(() => {
     if (brand?.product_name) document.title = `${brand.product_name} — Control Center`;
   }, [brand?.product_name]);
 
+  // ⌘K / Ctrl-K opens the palette anywhere.
+  React.useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCommandOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  /* The palette searches only what is already loaded. It never queries an endpoint that
+     does not exist, and it never lists a record the current role could not read. */
+  const commandItems = React.useMemo(() => [
+    ...NAV.map((n) => ({ id: n.id, label: n.label, group: "Section" })),
+    ...agentRows.map((a) => ({
+      id: `agents/${a.id}`, label: a.display_name ?? a.id, group: "Agent", hint: a.role,
+    })),
+    ...objectiveRows.map((o) => ({
+      id: "objectives", label: o.title ?? o.id, group: "Objective", hint: o.owner_display_name,
+    })),
+    ...channelRows.map((c) => ({
+      id: "channels", label: c.display_name ?? c.id, group: "Channel", hint: c.provider_label,
+    })),
+  ], [agentRows, objectiveRows, channelRows]);
+
+  const nav = NAV.map((item) =>
+    item.id === "approvals" ? { ...item, count: attention.length, urgent: attention.length > 0 }
+    : item.id === "agents" ? { ...item, count: agentRows.length }
+    : item.id === "work" ? { ...item, count: taskRows.length }
+    : item);
+
+  const openAgent = route.startsWith("agents/") ? route.slice("agents/".length) : null;
+  const activeAgent = openAgent ? agentRows.find((a) => a.id === openAgent) : null;
+  const meta = SCREEN_META[route.split("/")[0]] ?? SCREEN_META.overview;
+
   return (
-    <TooltipProvider>
-      <div className="min-h-screen">
-        {/* A quiet aurora behind the header. It is the only purely decorative thing on the
-            page, it is behind everything, and it never moves under reduced motion. */}
-        <div aria-hidden className="pointer-events-none fixed inset-x-0 top-0 -z-10 h-96 overflow-hidden">
-          <div className="bg-primary/20 absolute -top-40 left-1/4 size-96 rounded-full blur-3xl" />
-          <div className="bg-good/10 absolute -top-32 right-1/4 size-80 rounded-full blur-3xl" />
-        </div>
+    <TooltipProvider delayDuration={140}>
+      <Atmosphere />
+      <a
+        href="#main"
+        className="glass-solid text-ink sr-only rounded-lg px-3 py-2 text-sm focus:not-sr-only focus:absolute focus:top-3 focus:left-3 focus:z-50"
+      >
+        Skip to content
+      </a>
 
-        <header className="border-border/60 bg-background/70 sticky top-0 z-20 border-b backdrop-blur-xl">
-          <div className="mx-auto flex max-w-7xl items-center gap-4 px-6 py-4">
-            <motion.div
-              initial={{ opacity: 0, x: -8 }} animate={{ opacity: 1, x: 0 }}
-              transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-              className="min-w-0"
-            >
-              <div className="flex items-center gap-2">
-                <h1 className="truncate text-lg font-semibold tracking-tight">
-                  {brand?.product_name ?? "Control Center"}
-                </h1>
-                {brand ? (
-                  <Badge variant="outline" className="font-mono text-[10px]">{brand.tenant_id}</Badge>
-                ) : null}
-              </div>
-              <p className="text-muted-foreground truncate text-sm">
-                {brand?.welcome ?? "One workforce, and everything it is permitted to do."}
-              </p>
-            </motion.div>
+      <div className="flex min-h-screen">
+        <aside className="border-glass-border sticky top-0 hidden h-screen w-[212px] shrink-0 border-r backdrop-blur-xl lg:block">
+          <Sidebar route={route} go={go} items={nav}
+                   tenant={brand?.tenant_id} product={brand?.product_name} />
+        </aside>
 
-            <div className="ml-auto flex items-center gap-2">
-              {health.state === "ok" ? (
-                <Badge variant={health.data.runtime?.healthy === false ? "warn" : "good"} className="gap-1.5">
-                  <span className={cn("size-1.5 rounded-full",
-                    health.data.runtime?.healthy === false ? "bg-warn" : "bg-good animate-pulse")} />
-                  {String(health.data.runtime?.runtime ?? "runtime")}
-                </Badge>
-              ) : null}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <TopBar
+            title={activeAgent ? (activeAgent.display_name ?? activeAgent.id) : meta.title}
+            subtitle={activeAgent ? "Agent workspace" : meta.subtitle}
+            runtime={health.state === "ok" ? String(health.data.runtime?.runtime ?? "") : undefined}
+            healthy={health.state === "ok" ? health.data.runtime?.reachable !== false : undefined}
+            theme={theme} onToggleTheme={toggle} onOpenCommand={() => setCommandOpen(true)}
+          />
+
+          {/* Narrow viewports get the same sections as a scrollable rail rather than a
+              hamburger: an operator on a tablet is still doing the desktop job. */}
+          <div className="border-glass-border flex gap-1 overflow-x-auto border-b px-4 py-2 lg:hidden">
+            {nav.map((item) => (
               <button
-                type="button" onClick={toggle}
-                aria-label={theme === "dark" ? "Switch to light" : "Switch to dark"}
-                className="hover:bg-accent focus-visible:ring-ring rounded-md border p-2 transition-colors focus-visible:ring-2 focus-visible:outline-none"
+                key={item.id} type="button" onClick={() => go(item.id)}
+                aria-current={route.startsWith(item.id) ? "page" : undefined}
+                className={`shrink-0 rounded-lg px-2.5 py-1.5 text-[12.5px] font-medium transition-colors ${
+                  route.startsWith(item.id) ? "glass-solid text-ink" : "text-ink-muted"}`}
               >
-                {theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
+                {item.label}
               </button>
-            </div>
-          </div>
-        </header>
-
-        <main className="mx-auto max-w-7xl space-y-6 px-6 py-8">
-          {/* The five figures an operator reads before anything else. */}
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-            <Stat label="Agents" value={agentRows.length}
-                  hint="Materialized into the runtime from this tenant's bundle." />
-            <Stat label="Work in flight" value={taskRows.filter((t) => t.runtime_status === "running").length}
-                  tone="good" hint="Items a worker is actively running right now." />
-            <Stat label="Needs a human" tone="warn"
-                  value={taskRows.filter((t) => ["review", "blocked"].includes(String(t.runtime_status))).length}
-                  hint="Awaiting review, or held. These are the rows to act on." />
-            <Stat label="Channels" value={channelRows.filter((c) => c.status === "connected").length}
-                  hint="Connected and holding every credential they need." />
-            <Stat label="Corpora"
-                  value={knowledge.state === "ok" ? knowledge.data.sources.length : 0}
-                  hint="Declared knowledge sources an agent may be granted." />
+            ))}
           </div>
 
-          <div className="grid gap-6 lg:grid-cols-2">
-            <Panel title="Health" icon={Activity} state={health}
-                   description="What the platform and the runtime each say about themselves.">
-              {(data) => (
-                <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                  <dt className="text-muted-foreground">Platform</dt>
-                  <dd className="text-right font-medium">v{data.platform.version}</dd>
-                  <dt className="text-muted-foreground">Runtime</dt>
-                  <dd className="text-right font-medium">{String(data.runtime?.runtime ?? "—")}</dd>
-                  <dt className="text-muted-foreground flex items-center gap-1.5">
-                    Bundle digest
-                    <InfoDot text="A content hash of the whole declaration — agents, policy, knowledge, channels. If it changes, something was re-declared." />
-                  </dt>
-                  <dd className="truncate text-right font-mono text-xs" title={data.bundle.digest}>
-                    {data.bundle.digest.replace("sha256:", "").slice(0, 12)}
-                  </dd>
-                  {data.runtime?.detail ? (
-                    <>
-                      <dt className="text-muted-foreground">Detail</dt>
-                      <dd className="text-right text-xs">{String(data.runtime.detail)}</dd>
-                    </>
-                  ) : null}
-                </dl>
-              )}
-            </Panel>
-
-            <Panel title="Agents" icon={Bot} state={agents} count={plural(agentRows.length, "agent")}
-                   description="Who exists, and whether the runtime holds what the bundle declares."
-                   empty={(d) => d.agents.length ? null : { title: "No agents materialized", detail: "Run `nova apply <bundle>`." }}>
-              {(data) => (
-                <div className="space-y-0.5">
-                  {data.agents.map((agent, i) => (
-                    <Row key={String(agent.id)} index={i}>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium">{String(agent.display_name ?? agent.id)}</div>
-                        <div className="text-muted-foreground truncate font-mono text-xs">{String(agent.id)}</div>
-                      </div>
-                      {agent.enabled === false ? <Badge variant="secondary">disabled</Badge> : null}
-                      <Badge variant={agent.in_sync === false ? "warn" : "good"}>
-                        {agent.in_sync === false ? "drifted" : "in sync"}
-                      </Badge>
-                    </Row>
-                  ))}
+          <main id="main" className="mx-auto w-full max-w-[1400px] flex-1 px-6 py-6">
+            {activeAgent ? (
+              <AgentDetail
+                agent={activeAgent} tasks={taskRows} channels={channelRows}
+                knowledge={knowledgeRows}
+                policy={policy.state === "ok" ? policy.data : undefined}
+                budget={budget.state === "ok" ? budget.data : undefined}
+                decisions={decisionRows} onBack={() => go("agents")}
+              />
+            ) : route === "overview" ? (
+              <div className="space-y-6">
+                <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                  <MetricCard label="Working now" value={running.length} tone="running"
+                    source={tasks.state}
+                    caption={running.length ? "items running or ready to start" : "nothing running"}
+                    onClick={() => go("work")}
+                    hint="Items a worker is running or ready to pick up." />
+                  <MetricCard label="Needs a human" value={attention.length}
+                    source={tasks.state}
+                    tone={attention.length ? "waiting" : "neutral"}
+                    caption={attention.length ? "held until someone decides" : "nothing is held"}
+                    onClick={() => go("approvals")}
+                    hint="Work the runtime stopped and will not resume without a decision." />
+                  <MetricCard label="Agents" value={agentRows.length} onClick={() => go("agents")}
+                    source={agents.state}
+                    caption={`${agentRows.filter((a) => a.in_sync !== false).length} in sync with the bundle`}
+                    hint="Declared in the tenant bundle and materialized into the runtime." />
+                  <MetricCard label="Channels live" value={connected.length} onClick={() => go("channels")}
+                    source={channels.state}
+                    caption={channelRows.length ? `of ${plural(channelRows.length, "connection")}` : "none connected"}
+                    hint="Connected and holding every credential the provider needs." />
                 </div>
-              )}
-            </Panel>
-          </div>
 
-          <Panel title="Channels" icon={MessagesSquare} state={channels}
-                 count={channelRows.length ? plural(channelRows.length, "channel") : undefined}
-                 description="The places customers already talk, and which workers each one may reach."
-                 empty={(d) =>
-                   !d.channel_delivery
-                     ? { title: "This runtime cannot deliver channels", detail: "A declared channel would be carried and never delivered, so none are offered." }
-                     : d.channels.length ? null
-                     : { title: "No channels connected", detail: `The workforce is reachable only through NOVA itself. Available: ${d.catalogue.map((c) => c.label).join(", ")}.` }}>
-            {(data) => (
-              <div className="space-y-1">
-                {data.channels.map((channel, i) => {
-                  const missing = Object.entries(channel.missing_by_agent ?? {})
-                    .filter(([, names]) => (names as string[])?.length);
-                  return (
-                    <Row key={String(channel.id)} index={i} className="items-start">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="truncate text-sm font-medium">
-                            {String(channel.display_name ?? channel.id)}
-                          </span>
-                          <Badge variant={tone(String(channel.status))}>
-                            {String(channel.status).replace(/_/g, " ")}
-                          </Badge>
-                          {channel.verification !== "field_validated" ? (
-                            <Hint text="How this provider's support was established. 'source read' means the implementation was read, not connected to a live provider — a tick that means 'a plugin exists' is the tick a customer signs a contract on.">
-                              <Badge variant="outline" className="text-[10px]">
-                                {String(channel.verification).replace(/_/g, " ")}
-                              </Badge>
-                            </Hint>
-                          ) : null}
-                        </div>
-                        <div className="text-muted-foreground mt-0.5 text-xs">
-                          {String(channel.provider_label)} · {String(channel.transport)}
-                          {channel.needs_public_endpoint ? (
-                            <> · <Hint text="This provider calls in, so the deployment must expose a publicly reachable HTTPS endpoint. That is a security decision, not a checkbox.">needs a public endpoint</Hint></>
-                          ) : null}
-                        </div>
-                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                          <span className="text-muted-foreground text-xs">may reach</span>
-                          {(channel.allowed_agents ?? []).map((a: string) => (
-                            <Badge key={a} variant="secondary" className="font-normal">{a}</Badge>
-                          ))}
-                        </div>
-                        {(channel.approval_required_for ?? []).length ? (
-                          <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                            <Hint text="Anything reached over this channel escalates these to a human, on top of what the agent already escalates everywhere. A channel can tighten approval, never loosen it.">
-                              <span className="text-warn text-xs">needs a human for</span>
-                            </Hint>
-                            {(channel.approval_required_for as string[]).map((a) => (
-                              <Badge key={a} variant="warn" className="font-normal">{a}</Badge>
-                            ))}
-                          </div>
-                        ) : null}
-                        {(channel.derived_agents ?? []).length ? (
-                          <div className="text-muted-foreground mt-1 text-[11px]">
-                            <Hint text="The runtime's policy hook is never told which channel it is serving, so a tighter posture becomes its own profile with its own compiled policy. It does not share conversation history with the base agent.">
-                              runs as
-                            </Hint>
-                            {" "}
-                            {(channel.derived_agents as any[]).map((d) => d.id).join(", ")}
-                          </div>
-                        ) : null}
-                        {(channel.routes ?? []).length ? (
-                          <div className="text-muted-foreground mt-1 font-mono text-[11px]">
-                            {(channel.routes as any[]).map((r) =>
-                              `${r.conversation || r.workspace || "everything else"} → ${r.agent}`).join("   ·   ")}
-                          </div>
-                        ) : null}
-                      </div>
-                      {missing.length ? (
-                        <div className="text-warn shrink-0 text-right text-xs">
-                          {missing.map(([agent, names]) => (
-                            <div key={agent}>{agent}: {(names as string[]).join(", ")}</div>
-                          ))}
-                        </div>
-                      ) : null}
-                    </Row>
-                  );
-                })}
-              </div>
-            )}
-          </Panel>
-
-          <div className="grid gap-6 lg:grid-cols-2">
-            <Panel title="Work" icon={ListChecks} state={tasks} count={plural(taskRows.length, "item")}
-                   description="What the workforce is doing, newest first."
-                   empty={(d) => d.tasks.length ? null : { title: "Nothing on the board", detail: "Submit an objective with `nova objective submit`." }}>
-              {(data) => (
-                <div className="space-y-0.5">
-                  {data.tasks.slice(0, 12).map((task, i) => (
-                    <Row key={String(task.task_id)} index={i}>
-                      <Badge variant={tone(String(task.runtime_status))} className="w-20 shrink-0 justify-center">
-                        {String(task.runtime_status)}
-                      </Badge>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm">{String(task.title)}</div>
-                        <div className="text-muted-foreground truncate text-xs">
-                          {String(task.agent_id ?? "unassigned")}
-                          {task.last_error ? (
-                            <> · <span className="text-destructive">{String(task.last_error).slice(0, 60)}</span></>
-                          ) : null}
-                        </div>
-                      </div>
-                      {task.needs_attention ? (
-                        <Hint text="Blocked, or awaiting review. Act on it with `nova work` or the control plane's write path.">
-                          <Badge variant="warn">needs a human</Badge>
-                        </Hint>
-                      ) : null}
-                    </Row>
-                  ))}
-                </div>
-              )}
-            </Panel>
-
-            <Panel title="Objectives" icon={Target} state={objectives}
-                   description="Repeatable business processes, and where each has got to."
-                   empty={(d) => d.objectives?.length ? null : { title: "No objectives declared", detail: d.detail ?? "Add objectives/ to the tenant bundle." }}>
-              {(data) => (
-                <div className="space-y-0.5">
-                  {data.objectives.map((objective, i) => (
-                    <Row key={String(objective.id)} index={i}>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium">{String(objective.title ?? objective.id)}</div>
-                        <div className="text-muted-foreground truncate text-xs">
-                          owned by {String(objective.owner_display_name ?? objective.owner ?? "—")}
-                          {" · "}
-                          {Number(objective.done ?? 0)}/{Number(objective.total ?? (objective.steps ?? []).length)} done
-                        </div>
-                        {/* Progress, because "running" alone does not say whether it is nearly
-                            finished or has not started. */}
-                        <div className="bg-muted mt-1.5 h-1 w-full overflow-hidden rounded-full">
-                          <motion.div
-                            className="bg-primary h-full"
-                            initial={{ width: 0 }}
-                            animate={{ width: `${Math.round(100 * (Number(objective.done ?? 0) / Math.max(1, Number(objective.total ?? 1))))}%` }}
-                            transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
-                          />
-                        </div>
-                      </div>
-                      {(objective.refusals ?? []).length ? (
-                        <Hint text="A step was routed to an agent its owner was never permitted to delegate to, so it was refused before any work was created.">
-                          <Badge variant="destructive">refused</Badge>
-                        </Hint>
-                      ) : (
-                        <Badge variant={tone(String(objective.state))}>{String(objective.state ?? "—")}</Badge>
-                      )}
-                    </Row>
-                  ))}
-                </div>
-              )}
-            </Panel>
-          </div>
-
-          <div className="grid gap-6 lg:grid-cols-2">
-            <Panel title="Knowledge" icon={BookOpen} state={knowledge}
-                   description="The documents the workforce may quote, and who may read each."
-                   empty={(d) =>
-                     !d.retrieval_enabled
-                       ? { title: "Retrieval is unavailable on this runtime", detail: "Declared sources are recorded but no agent can search them." }
-                       : d.sources.length ? null : { title: "No corpora declared", detail: "Add knowledge.yaml, then run `nova knowledge ingest`." }}>
-              {(data) => (
-                <div className="space-y-0.5">
-                  {data.sources.map((source, i) => (
-                    <Row key={String(source.id)} index={i}>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium">{String(source.title ?? source.id)}</div>
-                        <div className="text-muted-foreground truncate text-xs">
-                          readable by {(source.readable_by ?? []).length ? (source.readable_by as string[]).join(", ") : "nobody"}
-                        </div>
-                      </div>
-                      {source.indexed
-                        ? <Badge variant="good">{plural(Number(source.documents ?? 0), "doc")}</Badge>
-                        : <Badge variant="warn">not indexed</Badge>}
-                    </Row>
-                  ))}
-                </div>
-              )}
-            </Panel>
-
-            <Panel title="Governance" icon={ShieldCheck} state={policy}
-                   description="What each agent is permitted to do, and what is actually enforced."
-                   empty={(d) => d.agents?.length ? null : { title: "No policy declared", detail: "Without policy.yaml no enforcement plugin is installed, and agents behave as they did before governance existed." }}>
-              {(data) => (
-                <div className="space-y-0.5">
-                  {(data.agents ?? []).map((entry, i) => (
-                    <Row key={String(entry.id ?? i)} index={i} className="items-start">
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate text-sm font-medium">
-                          {String(entry.display_name ?? entry.id)}
-                        </div>
-                        <div className="text-muted-foreground mt-0.5 flex flex-wrap items-center gap-x-3 text-xs">
-                          <span>{plural(Number(entry.allow?.length ?? 0), "tool")} allowed</span>
-                          {entry.deny?.length ? (
-                            <Hint text="Deny is last-word: it wins over any allowlist or toolset, and it is enforced before the tool runs.">
-                              <span className="text-destructive">{entry.deny.length} denied</span>
-                            </Hint>
-                          ) : null}
-                          {entry.approval_actions?.length ? (
-                            <Hint text={`Escalated to a human before running: ${entry.approval_actions.join(", ")}.`}>
-                              <span className="text-warn">{entry.approval_actions.length} need approval</span>
-                            </Hint>
-                          ) : null}
-                        </div>
-                      </div>
-                      <Hint text={
-                        entry.unlisted_tool === "deny"
-                          ? "A tool this agent was not granted is refused before it executes — proven inside a live worker process."
-                          : "Anything not explicitly denied is allowed for this agent."
-                      }>
-                        <Badge variant={entry.unlisted_tool === "deny" ? "good" : "warn"}>
-                          {entry.unlisted_tool === "deny" ? "default deny" : "default allow"}
-                        </Badge>
-                      </Hint>
-                    </Row>
-                  ))}
-                </div>
-              )}
-            </Panel>
-          </div>
-
-          <div className="grid gap-6 lg:grid-cols-2">
-            <Panel title="Recent decisions" icon={ShieldCheck} state={decisions}
-                   description="Every allow, escalation and refusal the policy layer made."
-                   empty={(d) => d.decisions?.length ? null : { title: "No decisions recorded yet", detail: "The log fills as agents call tools." }}>
-              {(data) => (
-                <div className="space-y-0.5">
-                  {data.decisions.slice(0, 10).map((decision, i) => (
-                    <Row key={i} index={i}>
-                      <Badge variant={decision.outcome === "deny" ? "destructive"
-                        : decision.outcome === "escalate" ? "warn" : "good"} className="w-20 shrink-0 justify-center">
-                        {String(decision.outcome)}
-                      </Badge>
-                      <div className="min-w-0 flex-1">
-                        <div className="truncate font-mono text-xs">{String(decision.tool ?? "—")}</div>
-                        <div className="text-muted-foreground truncate text-xs">{String(decision.agent_id ?? "")}</div>
-                      </div>
-                    </Row>
-                  ))}
-                </div>
-              )}
-            </Panel>
-
-            <Panel title="Usage" icon={CircleDollarSign} state={budget}
-                   description="Reported model usage. Observation, not a ceiling.">
-              {(data) => (
-                <div className="space-y-3">
-                  <div className="space-y-0.5">
-                    {(data.agents ?? []).map((row, i) => (
-                      <Row key={String(row.agent_id ?? i)} index={i}>
-                        <div className="min-w-0 flex-1 truncate text-sm">{String(row.agent_id)}</div>
-                        <div className="text-muted-foreground shrink-0 font-mono text-xs tabular-nums">
-                          {Number(row.total_tokens ?? 0).toLocaleString()} tok
-                        </div>
-                      </Row>
-                    ))}
+                <div className="grid gap-5 xl:grid-cols-3">
+                  <div className="xl:col-span-2">
+                    {/* h-full: the grid row is as tall as the right-hand column, and a
+                        panel that stops short of it reads as a rendering fault rather
+                        than a deliberate edge. */}
+                    <GlassPanel className="h-full p-5">
+                      <SectionHeader title="The workforce" icon={Boxes}
+                        detail="Every agent, what it is doing, and what it may reach."
+                        action={
+                          <button type="button" onClick={() => go("agents")}
+                            className="text-ink-faint hover:text-ink text-[12px] transition-colors">
+                            {agentRows.length > OVERVIEW_AGENTS
+                              ? `View all ${agentRows.length}`
+                              : "View all"}
+                          </button>
+                        } />
+                      <AgentsScreen agents={agents} tasks={taskRows} channels={channelRows}
+                                    limit={OVERVIEW_AGENTS}
+                                    onOpen={(id) => go(`agents/${id}`)} />
+                    </GlassPanel>
                   </div>
-                  <p className="text-muted-foreground border-warn/40 border-l-2 pl-3 text-xs">
-                    <Hint text="This runtime's model-boundary hooks discard their return values, so a token or cost ceiling cannot be enforced here. Set the limit in your provider's own console.">
-                      These figures are reported, never enforced.
-                    </Hint>
-                  </p>
-                </div>
-              )}
-            </Panel>
-          </div>
 
-          <footer className="text-muted-foreground flex flex-wrap items-center gap-x-4 gap-y-1 pt-2 pb-10 text-xs">
-            <span>{brand?.company_name ?? "NOVA"}</span>
-            {brand?.support?.email ? <span>{brand.support.email}</span> : null}
-            <span className="ml-auto">Read-only surfaces refresh every 15s.</span>
+                  <div className="space-y-5">
+                    <Panel title="Platform" icon={LayoutDashboard} state={health}
+                           detail="What the platform and the runtime each say.">
+                      {(data) => (
+                        <dl className="space-y-2.5 text-[13px]">
+                          <Row label="Platform" value={`v${data.platform.version}`} />
+                          <Row label="Runtime" value={String(data.runtime?.runtime ?? "—")} />
+                          <Row label="Agents in runtime" value={String(data.runtime?.agent_count ?? "—")} />
+                          <Row label="Bundle" value={data.bundle.digest.replace("sha256:", "").slice(0, 12)} mono />
+                        </dl>
+                      )}
+                    </Panel>
+
+                    <Panel title="Needs a human" icon={CircleCheck} state={tasks}
+                           detail="Held until someone decides."
+                           empty={(d) => d.tasks.some((t) => t.needs_attention) ? null : {
+                             title: "Nothing is waiting",
+                             detail: "Your workforce is operating inside its permitted actions.",
+                           }}>
+                      {(data) => (
+                        <ul className="divide-glass-border divide-y">
+                          {data.tasks.filter((t) => t.needs_attention).slice(0, 5).map((task) => (
+                            <li key={task.task_id} className="py-2 first:pt-0 last:pb-0">
+                              <p className="text-ink line-clamp-2 text-[12.5px] leading-snug">{task.title}</p>
+                              <p className="text-ink-faint mt-0.5 text-[11px]">{task.agent_id}</p>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </Panel>
+                  </div>
+                </div>
+
+                <GlassPanel className="p-5">
+                  <SectionHeader title="Channels" icon={Blocks}
+                    detail="Where the workforce can be reached, and by whom." />
+                  <ChannelsScreen channels={channels} />
+                </GlassPanel>
+              </div>
+            ) : route === "agents" ? (
+              <AgentsScreen agents={agents} tasks={taskRows} channels={channelRows}
+                            onOpen={(id) => go(`agents/${id}`)} />
+            ) : route === "objectives" ? <ObjectivesScreen objectives={objectives} />
+            : route === "work" ? <WorkScreen tasks={tasks} />
+            : route === "approvals" ? (
+              <ApprovalsScreen tasks={taskRows} decisions={decisionRows} agents={agentRows}
+                               channels={channelRows} canSeeDecisions={decisions.state === "ok"} />
+            )
+            : route === "activity" ? <ActivityScreen decisions={decisions} />
+            : route === "knowledge" ? <KnowledgeScreen knowledge={knowledge} />
+            : route === "channels" ? <ChannelsScreen channels={channels} />
+            : route === "policies" ? <PoliciesScreen policy={policy} />
+            : route === "usage" ? <UsageScreen budget={budget} />
+            : <ObjectivesScreen objectives={objectives} />}
+          </main>
+
+          <footer className="text-ink-faint mx-auto w-full max-w-[1400px] px-6 pt-2 pb-8 text-[11.5px]">
+            <div className="border-glass-border flex flex-wrap items-center gap-x-4 gap-y-1 border-t pt-4">
+              <span>{brand?.company_name ?? "NOVA"}</span>
+              {brand?.support?.email ? <span>{brand.support.email}</span> : null}
+              <span className="ml-auto">Read-only surfaces refresh every 15 seconds.</span>
+            </div>
           </footer>
-        </main>
+        </div>
       </div>
+
+      <CommandBar open={commandOpen} onClose={() => setCommandOpen(false)}
+                  items={commandItems} onPick={go} />
     </TooltipProvider>
+  );
+}
+
+function Row({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <dt className="text-ink-faint">{label}</dt>
+      <dd className={`text-ink truncate font-medium ${mono ? "font-mono text-[11.5px]" : ""}`}>{value}</dd>
+    </div>
   );
 }
