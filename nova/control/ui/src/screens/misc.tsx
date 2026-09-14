@@ -5,6 +5,7 @@ import {
 import { Chip, EmptyState, GlassCard, GlassPanel, SectionHeader, StatusPill } from "@/components/glass";
 import { Hint, InfoDot } from "@/components/tooltip";
 import { PanelBody } from "@/components/panel";
+import { TaskDetailPanel } from "./task-detail";
 import { plural } from "@/lib/api";
 import {
   absolute, absoluteIso, channelLabel, channelState, dayLabel, decisionLabel, decisionState,
@@ -16,6 +17,8 @@ import type { Budget, Channel, Decision, KnowledgeSource, Objective, Policy, Tas
 /* ── Work ─────────────────────────────────────────────────────────────────── */
 
 export function WorkScreen({ tasks }: { tasks: Loaded<{ tasks: Task[]; counts?: Record<string, number> }> }) {
+  // The open record is local to this screen: it is a view of one row, not navigation.
+  const [openTask, setOpenTask] = React.useState<string | null>(null);
   return (
     <PanelBody state={tasks} empty={(d) => d.tasks.length ? null : {
       title: "Nothing on the board",
@@ -27,16 +30,27 @@ export function WorkScreen({ tasks }: { tasks: Loaded<{ tasks: Task[]; counts?: 
         const rest = data.tasks.filter((t) => !t.needs_attention);
         return (
           <div className="space-y-5">
+            {openTask ? (
+              <TaskDetailPanel taskId={openTask} onClose={() => setOpenTask(null)} />
+            ) : null}
             {attention.length ? (
               <div>
                 <SectionHeader title="Needs a human"
                   detail="Held or awaiting review. These are the rows to act on." icon={CircleCheck} />
-                <div className="space-y-2">{attention.map((t) => <TaskRow key={t.task_id} task={t} />)}</div>
+                <div className="space-y-2">
+                  {attention.map((t) => (
+                    <TaskRow key={t.task_id} task={t} onOpen={() => setOpenTask(t.task_id)} />
+                  ))}
+                </div>
               </div>
             ) : null}
             <div>
               {attention.length ? <SectionHeader title="Everything else" /> : null}
-              <div className="space-y-2">{rest.map((t) => <TaskRow key={t.task_id} task={t} />)}</div>
+              <div className="space-y-2">
+                {rest.map((t) => (
+                  <TaskRow key={t.task_id} task={t} onOpen={() => setOpenTask(t.task_id)} />
+                ))}
+              </div>
             </div>
           </div>
         );
@@ -45,9 +59,19 @@ export function WorkScreen({ tasks }: { tasks: Loaded<{ tasks: Task[]; counts?: 
   );
 }
 
-function TaskRow({ task }: { task: Task }) {
+function TaskRow({ task, onOpen }: { task: Task; onOpen?: () => void }) {
   return (
-    <GlassCard className="flex items-start gap-3 p-3" interactive={false}>
+    <GlassCard
+      className="flex w-full items-start gap-3 p-3 text-left"
+      interactive={Boolean(onOpen)}
+      {...(onOpen ? {
+        role: "button", tabIndex: 0, onClick: onOpen,
+        "aria-label": `Open the record for ${task.title}`,
+        onKeyDown: (e: React.KeyboardEvent) => {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); }
+        },
+      } : {})}
+    >
       <StatusPill state={taskState(task.runtime_status)} className="mt-0.5 w-[158px] shrink-0 justify-start">
         {taskLabel(task.runtime_status)}
       </StatusPill>

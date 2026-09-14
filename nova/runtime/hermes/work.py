@@ -17,7 +17,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
-from nova.runtime.base import TaskView
+from nova.runtime.base import (
+    ArtifactView, TaskDetail, TaskNoteView, TaskRunView, TaskView,
+)
 
 #: When set truthy, a tenant-scoped read refuses rows that carry NO tenant at all,
 #: instead of treating them as the caller's own legacy work.
@@ -228,3 +230,119 @@ def store_status(home: Path) -> tuple[bool, str]:
         except sqlite3.Error as exc:
             return False, f"work store present but unreadable: {exc}"
     return True, ""
+
+
+def _child_rows(
+    connection: sqlite3.Connection, table: str, task_id: str, order: str
+) -> list[sqlite3.Row]:
+    """Rows of a task's child table, tenant-checked by the caller's own task lookup.
+
+    The task is resolved first and the tenant checked there; these follow the task_id.
+    Kept tolerant of a missing table so an older board degrades to "no history" rather
+    than to "unreadable task".
+    """
+    try:
+        return connection.execute(
+            f"SELECT * FROM {table} WHERE task_id = ? ORDER BY {order}",  # noqa: S608
+            (task_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+
+
+def _opt_int(value: object) -> Optional[int]:
+    try:
+        return None if value is None else int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def task_detail(home: Path, task_id: str, *, tenant_id: str = "") -> Optional[TaskDetail]:
+    """One task with its attempts, notes and artifacts — or None.
+
+    The tenant check happens once, on the task itself, via :func:`get_task`. Everything
+    below hangs off a task id that has already been proven to belong to the caller, so a
+    foreign id returns None here and never reaches a child query.
+
+    Artifacts deliberately drop ``stored_path``: it is an absolute host path, useless to
+    a browser and useful to an attacker. See :class:`nova.runtime.base.ArtifactView`.
+    """
+    task = get_task(home, task_id, tenant_id=tenant_id)
+    if task is None:
+        return None
+
+    with _readonly(work_store_path(home)) as connection:
+        if connection is None:
+            return TaskDetail(task=task)
+
+        runs = tuple(
+            TaskRunView(
+                run_id=int(row["id"]),
+                status=str(row["status"] or ""),
+                outcome=str(_row(row, "outcome") or ""),
+                started_at=_opt_int(_row(row, "started_at")),
+                ended_at=_opt_int(_row(row, "ended_at")),
+                summary=str(_row(row, "summary") or ""),
+                error=str(_row(row, "error") or ""),
+                agent_id=str(_row(row, "profile") or ""),
+            )
+            for row in _child_rows(connection, "task_runs", task_id, "started_at ASC, id ASC")
+        )
+        notes = tuple(
+            TaskNoteView(
+                author=str(_row(row, "author") or ""),
+                body=str(_row(row, "body") or ""),
+                created_at=_opt_int(_row(row, "created_at")),
+            )
+            for row in _child_rows(connection, "task_comments", task_id, "created_at ASC, id ASC")
+        )
+        artifacts = tuple(
+            ArtifactView(
+                artifact_id=int(row["id"]),
+                filename=str(_row(row, "filename") or ""),
+                content_type=str(_row(row, "content_type") or ""),
+                size_bytes=int(_row(row, "size") or 0),
+                uploaded_by=str(_row(row, "uploaded_by") or ""),
+                created_at=_opt_int(_row(row, "created_at")),
+            )
+            for row in _child_rows(
+                connection, "task_attachments", task_id, "created_at ASC, id ASC"
+            )
+        )
+        depends_on, blocks = _task_edges(connection, task_id)
+
+    return TaskDetail(
+        task=task, runs=runs, notes=notes, artifacts=artifacts,
+        depends_on=depends_on, blocks=blocks,
+    )
+
+
+def _task_edges(
+    connection: sqlite3.Connection, task_id: str
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``(parents, children)`` from the runtime's own durable edge table.
+
+    These are *task* edges. They are not a record of in-process subagent delegation,
+    which the runtime does not persist — see the capability audit before labelling any
+    visualisation built on this an "agent team".
+    """
+    try:
+        parents = tuple(
+            str(r[0]) for r in connection.execute(
+                "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id",
+                (task_id,),
+            )
+        )
+        children = tuple(
+            str(r[0]) for r in connection.execute(
+                "SELECT child_id FROM task_links WHERE parent_id = ? ORDER BY child_id",
+                (task_id,),
+            )
+        )
+    except sqlite3.Error:
+        return (), ()
+    return parents, children
+
+
+def _row(row: sqlite3.Row, name: str, default=None):
+    return row[name] if name in row.keys() else default

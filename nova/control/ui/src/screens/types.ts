@@ -79,3 +79,23 @@ export type Budget = {
   }>;
   observed_caveat?: string; enforcement_classes?: any[];
 };
+
+/** GET /platform/v1/tasks/{id} — the runtime's own record of how the work went.
+ *
+ *  Artifacts deliberately carry no path: the adapter drops the attachment's absolute
+ *  host path, which is useless to a browser and useful to an attacker. */
+export type TaskDetail = {
+  task: Task;
+  runs: Array<{
+    run_id: number; status: string; outcome: string;
+    started_at?: number | null; ended_at?: number | null;
+    summary: string; error: string; agent_id: string;
+  }>;
+  notes: Array<{ author: string; body: string; created_at?: number | null }>;
+  artifacts: Array<{
+    artifact_id: number; filename: string; content_type: string;
+    size_bytes: number; uploaded_by: string; created_at?: number | null;
+  }>;
+  depends_on: string[];
+  blocks: string[];
+};

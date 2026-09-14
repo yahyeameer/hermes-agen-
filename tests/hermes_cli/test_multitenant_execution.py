@@ -725,3 +725,92 @@ def test_separate_processes_in_different_tenants_each_get_their_own_job(board):
     conn = kbc.connect()
     assert kb.get_task(conn, outs["tenant-a"]).tenant == "tenant-a"
     assert kb.get_task(conn, outs["tenant-b"]).tenant == "tenant-b"
+
+
+# ---------------------------------------------------------------------------
+# Child rows: hiding the task is not enough
+# ---------------------------------------------------------------------------
+
+def _task_with_history(conn):
+    task_id = kb.create_task(conn, title="A confidential", tenant="tenant-a", assignee="ops")
+    kb.add_comment(conn, task_id, "alice", "the merger closes Friday")
+    kb.claim_task(conn, task_id)
+    kb.complete_task(conn, task_id, result="done")
+    conn.commit()
+    return task_id
+
+
+@pytest.mark.parametrize(
+    "reader",
+    [
+        pytest.param(lambda conn, tid: kb.list_comments(conn, tid), id="comments"),
+        pytest.param(lambda conn, tid: kb.list_comments_after(conn, tid), id="comments_after"),
+        pytest.param(lambda conn, tid: kb.list_events(conn, tid), id="events"),
+        pytest.param(lambda conn, tid: kb.list_runs(conn, tid), id="runs"),
+        pytest.param(lambda conn, tid: kb.list_attachments(conn, tid), id="attachments"),
+    ],
+)
+def test_child_rows_do_not_leak_across_tenants(board, reader):
+    """A task id is guessable. Before this, ``get_task`` correctly returned None
+    while the same id still yielded that task's comment bodies verbatim, its run
+    history and its attachment paths."""
+    conn = kbc.connect()
+    task_id = _task_with_history(conn)
+
+    with kt.use("tenant-b"):
+        assert reader(conn, task_id) == []
+
+    with kt.use("tenant-a"):
+        assert reader(conn, task_id) is not None  # own data unaffected
+
+
+def test_comment_bodies_do_not_leak(board):
+    """Named separately because this is the one that leaks business content."""
+    conn = kbc.connect()
+    task_id = _task_with_history(conn)
+    with kt.use("tenant-b"):
+        bodies = [c.body for c in kb.list_comments(conn, task_id)]
+    assert bodies == []
+    with kt.use("tenant-a"):
+        assert [c.body for c in kb.list_comments(conn, task_id)] == ["the merger closes Friday"]
+
+
+def test_runs_addressed_by_their_own_id_do_not_leak(board):
+    """``get_run`` takes a run id, so the task-level guard never sees it."""
+    conn = kbc.connect()
+    task_id = _task_with_history(conn)
+    run_id = kb.list_runs(conn, task_id)[0].id
+
+    with kt.use("tenant-b"):
+        assert kb.get_run(conn, run_id) is None
+        assert kb.latest_run(conn, task_id) is None
+    with kt.use("tenant-a"):
+        assert kb.get_run(conn, run_id) is not None
+
+
+def test_attachment_paths_do_not_leak(board, tmp_path):
+    """``stored_path`` is an absolute filesystem path; ``get_attachment`` is
+    addressed by attachment id, not task id."""
+    conn = kbc.connect()
+    task_id = kb.create_task(conn, title="A", tenant="tenant-a", assignee="ops")
+    blob = tmp_path / "secret.pdf"
+    blob.write_text("x")
+    att_id = kb.add_attachment(
+        conn, task_id, filename="secret.pdf", stored_path=str(blob),
+        content_type="application/pdf", size=1, uploaded_by="alice",
+    )
+    conn.commit()
+
+    with kt.use("tenant-b"):
+        assert kb.get_attachment(conn, att_id) is None
+    with kt.use("tenant-a"):
+        assert kb.get_attachment(conn, att_id) is not None
+
+
+def test_unscoped_callers_still_read_child_rows(board):
+    """The CLI and dispatcher bind no tenant and must keep working."""
+    conn = kbc.connect()
+    task_id = _task_with_history(conn)
+    assert kt.current() is None
+    assert len(kb.list_comments(conn, task_id)) == 1
+    assert len(kb.list_runs(conn, task_id)) == 1

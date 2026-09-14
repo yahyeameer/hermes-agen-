@@ -1799,8 +1799,18 @@ def _require_task(conn: sqlite3.Connection, task_id: str) -> None:
 
 
 def _task_rows(conn: sqlite3.Connection, table: str, task_id: str, order: str) -> list[sqlite3.Row]:
+    """Child rows of one task, scoped to the operating tenant.
+
+    Hiding the *task* is not enough. An id is guessable, and a caller holding one
+    could read that task's comments, events, runs and attachment paths even though
+    ``get_task`` returned None for it — comment bodies verbatim. The child tables
+    carry their own ``tenant`` column precisely so this filter costs one predicate
+    rather than a join back to ``tasks``.
+    """
+    clause, params = _tenant_scope()
     return conn.execute(
-        f"SELECT * FROM {table} WHERE task_id = ? ORDER BY {order}", (task_id,)
+        f"SELECT * FROM {table} WHERE task_id = ?{clause} ORDER BY {order}",
+        (task_id, *params),
     ).fetchall()
 
 
@@ -1813,9 +1823,11 @@ def list_comments_after(
 ) -> list[Comment]:
     """Comments with ``id > after_id`` — keyed on rowid, not ``created_at``, so a
     same-second burst is never skipped (live worker comment bridge)."""
+    clause, params = _tenant_scope()
     rows = conn.execute(
         "SELECT id, task_id, author, body, created_at FROM task_comments "
-        "WHERE task_id = ? AND id > ? ORDER BY id ASC", (task_id, int(after_id)),
+        f"WHERE task_id = ? AND id > ?{clause} ORDER BY id ASC",
+        (task_id, int(after_id), *params),
     ).fetchall()
     return [Comment.from_row(r) for r in rows]
 
@@ -1912,7 +1924,16 @@ def list_attachments(conn: sqlite3.Connection, task_id: str) -> list[Attachment]
 
 
 def get_attachment(conn: sqlite3.Connection, attachment_id: int) -> Optional[Attachment]:
-    r = conn.execute("SELECT * FROM task_attachments WHERE id = ?", (attachment_id,)).fetchone()
+    """One attachment, or None — including when it belongs to another tenant.
+
+    Addressed by its own id rather than the task's, so the task-level guard never
+    sees it; the row's ``stored_path`` is an absolute filesystem path and must not
+    be handed to a caller who cannot see the task it hangs off.
+    """
+    clause, params = _tenant_scope()
+    r = conn.execute(
+        f"SELECT * FROM task_attachments WHERE id = ?{clause}", (attachment_id, *params)
+    ).fetchone()
     return None if r is None else Attachment.from_row(r)
 
 
@@ -4087,8 +4108,9 @@ def list_runs(
         raise ValueError("state_type and state_name must both be set or both omitted")
     if state_type is not None and state_type not in ("status", "outcome"):
         raise ValueError("state_type must be 'status' or 'outcome'")
-    q = "SELECT * FROM task_runs WHERE task_id = ?"
-    params: list[Any] = [task_id]
+    scope_clause, scope_params = _tenant_scope()
+    q = f"SELECT * FROM task_runs WHERE task_id = ?{scope_clause}"
+    params: list[Any] = [task_id, *scope_params]
     if not include_active:
         q += " AND ended_at IS NOT NULL"
     if state_type is not None:
@@ -4100,15 +4122,21 @@ def list_runs(
 
 
 def get_run(conn: sqlite3.Connection, run_id: int) -> Optional[Run]:
-    row = conn.execute("SELECT * FROM task_runs WHERE id = ?", (int(run_id),)).fetchone()
+    """One run, or None — including when it belongs to another tenant. Addressed by
+    its own id, so the task-level guard never sees it."""
+    clause, params = _tenant_scope()
+    row = conn.execute(
+        f"SELECT * FROM task_runs WHERE id = ?{clause}", (int(run_id), *params)
+    ).fetchone()
     return Run.from_row(row) if row else None
 
 
 def latest_run(conn: sqlite3.Connection, task_id: str) -> Optional[Run]:
     """Return the most recent run regardless of outcome (active or closed)."""
+    clause, params = _tenant_scope()
     row = conn.execute(
-        "SELECT * FROM task_runs WHERE task_id = ? "
-        "ORDER BY started_at DESC, id DESC LIMIT 1", (task_id,),
+        f"SELECT * FROM task_runs WHERE task_id = ?{clause} "
+        "ORDER BY started_at DESC, id DESC LIMIT 1", (task_id, *params),
     ).fetchone()
     return Run.from_row(row) if row else None
 

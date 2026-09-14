@@ -537,10 +537,20 @@ class ControlAPI:
         )
 
     def task(self, task_id: str) -> Response:
-        view = self.runtime.get_task(task_id)
-        if view is None:
+        """One task with the attempts, notes and artifacts the runtime already keeps.
+
+        404 — not 403 — for a task belonging to another tenant. A control plane that
+        distinguishes "forbidden" from "not found" confirms other tenants' task ids to
+        anyone who guesses one, and ids are short.
+
+        Artifacts carry no path: the runtime stores an absolute host path on every
+        attachment row, and it stops at the adapter (see
+        :class:`nova.runtime.base.ArtifactView`).
+        """
+        detail = self.runtime.task_detail(task_id)
+        if detail is None:
             return _error(404, f"no task {task_id!r}")
-        return Response(200, {"task": view.to_dict()})
+        return Response(200, detail.to_dict())
 
     # -- governance -----------------------------------------------------------
 

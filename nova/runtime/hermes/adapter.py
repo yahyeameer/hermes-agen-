@@ -449,6 +449,13 @@ class HermesRuntime(AgentRuntime):
     def get_task(self, task_id: str) -> Optional[TaskView]:
         return _work.get_task(self.paths.home, task_id, tenant_id=self.tenant_id)
 
+    def task_detail(self, task_id: str):
+        """The task plus the attempts, notes and artifacts the runtime already keeps.
+
+        Same tenant scope as :meth:`get_task` — a foreign id is None, not a 403.
+        """
+        return _work.task_detail(self.paths.home, task_id, tenant_id=self.tenant_id)
+
     def health(self) -> RuntimeHealth:
         present, detail = _work.store_status(self.paths.home)
         home_exists = self.paths.home.is_dir()

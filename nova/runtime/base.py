@@ -142,6 +142,96 @@ class TaskView:
 
 
 @dataclass(frozen=True)
+class TaskRunView:
+    """One attempt at a task.
+
+    A task that failed twice and succeeded on the third try is three rows here, and an
+    operator asking "why did this take all morning?" is asking about these, not about the
+    task's current state.
+    """
+
+    run_id: int
+    status: str
+    outcome: str = ""
+    started_at: Optional[int] = None
+    ended_at: Optional[int] = None
+    summary: str = ""
+    error: str = ""
+    agent_id: str = ""
+
+
+@dataclass(frozen=True)
+class TaskNoteView:
+    """A note on a task — from a person or from the worker itself."""
+
+    author: str
+    body: str
+    created_at: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class ArtifactView:
+    """A file a task produced.
+
+    Deliberately carries no path. The runtime stores an absolute host path on every
+    attachment row; it is attacker-useful and of no use to a browser, so it stops at the
+    adapter. A download, when one exists, must be mediated by NOVA and re-checked against
+    the tenant at request time.
+    """
+
+    artifact_id: int
+    filename: str
+    content_type: str = ""
+    size_bytes: int = 0
+    uploaded_by: str = ""
+    created_at: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class TaskDetail:
+    """Everything the control plane can say about one task.
+
+    Assembled from the runtime's own durable records — attempts, notes and artifacts all
+    already exist; nothing here is derived or estimated.
+    """
+
+    task: TaskView
+    runs: tuple[TaskRunView, ...] = ()
+    notes: tuple[TaskNoteView, ...] = ()
+    artifacts: tuple[ArtifactView, ...] = ()
+    depends_on: tuple[str, ...] = ()
+    blocks: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "task": self.task.to_dict(),
+            "runs": [
+                {
+                    "run_id": r.run_id, "status": r.status, "outcome": r.outcome,
+                    "started_at": r.started_at, "ended_at": r.ended_at,
+                    "summary": r.summary, "error": r.error, "agent_id": r.agent_id,
+                }
+                for r in self.runs
+            ],
+            "notes": [
+                {"author": n.author, "body": n.body, "created_at": n.created_at}
+                for n in self.notes
+            ],
+            "artifacts": [
+                {
+                    "artifact_id": a.artifact_id, "filename": a.filename,
+                    "content_type": a.content_type, "size_bytes": a.size_bytes,
+                    "uploaded_by": a.uploaded_by, "created_at": a.created_at,
+                }
+                for a in self.artifacts
+            ],
+            "depends_on": list(self.depends_on),
+            "blocks": list(self.blocks),
+        }
+
+
+
+@dataclass(frozen=True)
 class RuntimeHealth:
     """Whether the runtime is present and readable.
 
@@ -554,6 +644,16 @@ class AgentRuntime(ABC):
     @abstractmethod
     def get_task(self, task_id: str) -> Optional[TaskView]:
         """One task, or None when it is not present."""
+
+    def task_detail(self, task_id: str) -> Optional[TaskDetail]:
+        """A task with its attempts, notes and artifacts, or None.
+
+        Default returns the task alone, so a runtime that keeps no attempt history is
+        still answerable — it reports what it has rather than obliging every adapter to
+        invent a run model.
+        """
+        task = self.get_task(task_id)
+        return None if task is None else TaskDetail(task=task)
 
     @abstractmethod
     def health(self) -> RuntimeHealth:

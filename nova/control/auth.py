@@ -79,6 +79,34 @@ WRITE_ROUTES: Mapping[str, str] = {
     "/channels/apply": "admin",
 }
 
+#: Read routes that address ONE member of a collection, e.g. ``/tasks/t_ab12``. Only the
+#: prefixes listed here resolve to their collection's role; everything else still falls
+#: through to admin.
+#:
+#: Needed because ``ROUTE_ROLES`` is an exact-match table, so ``/tasks`` was readable by a
+#: viewer while ``/tasks/<id>`` silently required admin — a viewer could see that work
+#: existed but never open it. Declared as its own table rather than by loosening the
+#: default: the fail-closed default is the thing protecting every route nobody has
+#: thought about yet.
+ROUTE_COLLECTION_PREFIXES: Mapping[str, str] = {
+    "/tasks/": "viewer",
+}
+
+
+def _collection_role(route: str) -> Optional[str]:
+    """The role for a single-member read like ``/tasks/<id>``, or None.
+
+    One path segment only. ``/tasks/a/b`` is not a task read and must not inherit the
+    collection's role by accident.
+    """
+    for prefix, role in ROUTE_COLLECTION_PREFIXES.items():
+        if route.startswith(prefix):
+            member = route[len(prefix):]
+            if member and "/" not in member:
+                return role
+    return None
+
+
 #: The file, inside the runtime home, that lists who may call the control plane.
 PRINCIPALS_FILENAME = "control-principals.yaml"
 
@@ -102,7 +130,7 @@ class Principal:
 
     def may(self, route: str) -> bool:
         """Whether this principal may read ``route``. Unknown routes require admin."""
-        required = ROUTE_ROLES.get(route, "admin")
+        required = ROUTE_ROLES.get(route) or _collection_role(route) or "admin"
         return ROLES.index(self.role) >= ROLES.index(required)
 
     def may_write(self, route: str) -> bool:
