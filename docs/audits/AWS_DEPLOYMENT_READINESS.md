@@ -57,16 +57,23 @@ the full Hermes runtime image and that tenant's provider credentials.
 
 ## 3. Image tag
 
+Format `<version>-g<commit>`: the NOVA version from `nova/__init__.py`, then the commit the
+tree was built from. A dirty working tree appends `-dirty.<hash>` covering both modified
+tracked files and the contents of untracked ones.
+
+The guarantee is one-directional and worth stating exactly: **a tag never names two
+different trees.** The reverse does not hold — a commit that changes only documentation
+produces a new tag for byte-identical image content, which is harmless. `build.sh
+--print-tag` is authoritative for the tree you are on.
+
+The build these results came from:
+
 ```
 nova-control-plane:0.1.0-g2457731df55f
+sha256:fd5756c2dc2d945ddfb2a6cbcfb1a32f9b68d90c4dc2a6701656aaf306033db1
 ```
 
-Format `<version>-g<commit>`: the NOVA version from `nova/__init__.py`, then the commit the
-tree was built from. A dirty tree appends `-dirty.<hash>` covering both modified tracked
-files and the contents of untracked ones, so a tag always names exactly one tree state.
-
-Local image digest of this build: `sha256:fd5756c2dc2d945ddfb2a6cbcfb1a32f9b68d90c4dc2a6701656aaf306033db1`
-(a registry will assign its own digest on push; pin **that** one in `image_uri`).
+A registry assigns its own digest on push; pin **that** one in `image_uri`.
 
 Size: **304 MB**. `build.sh` also writes `nova-control-plane:local` for local work. That tag
 is mutable and must not be deployed — `image_uri` should carry the immutable tag above, or
