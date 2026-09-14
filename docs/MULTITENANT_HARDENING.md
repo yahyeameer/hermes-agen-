@@ -135,13 +135,28 @@ spawn budget 6, per-tenant cap 3
 |---|---|---|
 | kanban + platform, per file | 986 passing, 1 file failing | **989 passing, 1 file failing** |
 | NOVA platform suite | 680 passing | **680 passing** |
+| New multi-tenant suite | — | **36 passing** |
 
-The one failing file (`test_kanban_notify.py`, 13 tests) fails identically before and
-after: `pytest-asyncio` is not installed in this environment. Unrelated, pre-existing.
+Then, separately: **every one of the 85 test files that imports any module changed
+here**, run individually. Four files had failures, and all four fail identically on
+upstream `origin/main` in a clean worktree:
+
+| File | Failures | Cause |
+|---|---|---|
+| `tests/hermes_cli/test_kanban_notify.py` | 13 | `pytest-asyncio` not installed |
+| `tests/gateway/test_busy_wake_admission.py` | 3 | pre-existing on upstream |
+| `tests/gateway/test_kanban_wake_acceptance.py` | 3 | pre-existing on upstream |
+| `tests/run_agent/test_run_agent.py` | 1 | Anthropic interrupt handler; pre-existing on upstream |
 
 Run **per file**: the kanban suite has pre-existing cross-test pollution when run as one
 batch (28 failures on a clean tree, every file green in isolation). That is the
 pre-existing state, not something this change introduced.
+
+The whole `tests/hermes_cli` directory in one batch could **not** be completed: it hangs
+at ~84% on tests that reach for network endpoints the sandbox proxy refuses
+(`inference-api.nousresearch.com`, `openrouter.ai` and others), and
+`tests/gateway/relay` aborts collection outright on the missing `pytest-asyncio`. So no
+whole-repo pass/fail number is claimed here — only the per-file results above.
 
 ## 5. Two failures that were mine, not the product's
 
