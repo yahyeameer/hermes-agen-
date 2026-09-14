@@ -41,6 +41,13 @@ class RuntimeCapabilities:
 
     #: Work survives a process restart and runs with no interactive session attached.
     durable_tasks: bool = False
+    #: The runtime holds recurring/scheduled work per agent, and can report it.
+    #:
+    #: **It does not mean anything is running those schedules.** In Hermes the ticker
+    #: lives inside the gateway and there is no standalone cron daemon, so a deployment
+    #: can hold a correct schedule that never fires. That is a separate question, asked
+    #: per agent via :meth:`AgentRuntime.scheduler_health`.
+    scheduling: bool = False
     #: Concurrent agents get isolated working directories.
     worktree_isolation: bool = False
     #: Each agent runs in its own OS process.
@@ -229,6 +236,105 @@ class TaskDetail:
             "blocks": list(self.blocks),
         }
 
+
+
+@dataclass(frozen=True)
+class AutomationRunView:
+    """One attempt at a scheduled automation, from the runtime's execution ledger."""
+
+    run_id: str
+    status: str
+    claimed_at: str = ""
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    error: str = ""
+
+
+@dataclass(frozen=True)
+class SchedulerHealth:
+    """Whether anything is actually going to run this agent's schedules.
+
+    Separate from :class:`RuntimeHealth` because it answers a different question, and a
+    dangerous one to get wrong: a list of schedules with no scheduler attached looks
+    identical to a working automation suite right up until nothing happens.
+
+    ``running`` is "the loop is iterating"; ``healthy`` is "and it is completing ticks
+    without raising". A ticker stuck failing keeps the first true and the second false.
+    """
+
+    running: bool = False
+    healthy: bool = False
+    heartbeat_age_seconds: Optional[float] = None
+    success_age_seconds: Optional[float] = None
+    last_error: str = ""
+    detail: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "running": self.running,
+            "healthy": self.healthy,
+            "heartbeat_age_seconds": self.heartbeat_age_seconds,
+            "success_age_seconds": self.success_age_seconds,
+            "last_error": self.last_error,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class AutomationView:
+    """A recurring or scheduled piece of work the runtime holds for one agent.
+
+    A read model. ``schedule_display`` is the runtime's own rendering of the schedule —
+    re-deriving it from the expression would be a second implementation that drifts.
+
+    Deliberately carries no prompt or script. What an automation *tells an agent to do*
+    is instruction text; it is not needed to answer "what runs, when, and did it work",
+    and every field a control plane returns is a field that can leak.
+    """
+
+    automation_id: str
+    name: str
+    agent_id: str
+    schedule_display: str = ""
+    schedule_kind: str = ""
+    schedule_expression: str = ""
+    enabled: bool = True
+    state: str = ""
+    next_run_at: Optional[str] = None
+    last_run_at: Optional[str] = None
+    last_status: str = ""
+    last_error: str = ""
+    failure_streak: int = 0
+    paused_reason: str = ""
+    created_at: Optional[str] = None
+    runs: tuple[AutomationRunView, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "automation_id": self.automation_id,
+            "name": self.name,
+            "agent_id": self.agent_id,
+            "schedule_display": self.schedule_display,
+            "schedule_kind": self.schedule_kind,
+            "schedule_expression": self.schedule_expression,
+            "enabled": self.enabled,
+            "state": self.state,
+            "next_run_at": self.next_run_at,
+            "last_run_at": self.last_run_at,
+            "last_status": self.last_status,
+            "last_error": self.last_error,
+            "failure_streak": self.failure_streak,
+            "paused_reason": self.paused_reason,
+            "created_at": self.created_at,
+            "runs": [
+                {
+                    "run_id": r.run_id, "status": r.status, "claimed_at": r.claimed_at,
+                    "started_at": r.started_at, "finished_at": r.finished_at,
+                    "error": r.error,
+                }
+                for r in self.runs
+            ],
+        }
 
 
 @dataclass(frozen=True)
@@ -658,6 +764,37 @@ class AgentRuntime(ABC):
     @abstractmethod
     def health(self) -> RuntimeHealth:
         """Whether the runtime is present and readable."""
+
+    def list_automations(self, *, agent_id: str = "") -> list["AutomationView"]:
+        """Recurring and scheduled work the runtime holds, per agent.
+
+        Empty by default: a runtime with no scheduler reports none rather than obliging
+        every adapter to model one. Check ``capabilities.scheduling`` to tell "none
+        declared" from "this runtime cannot schedule".
+        """
+        return []
+
+    def scheduler_health(self, agent_id: str) -> "SchedulerHealth":
+        """Whether this agent's schedules will actually fire.
+
+        A schedule the runtime holds and a schedule something is running are different
+        facts, and the gap between them is invisible until work silently stops. Default
+        reports not-running with a reason rather than implying health.
+        """
+        return SchedulerHealth(
+            running=False,
+            detail=f"runtime {self.name!r} does not report scheduler liveness",
+        )
+
+    def set_automation_enabled(
+        self, agent_id: str, automation_id: str, *, enabled: bool, reason: str = "",
+    ) -> Optional["AutomationView"]:
+        """Pause or resume one automation; None when it is not this agent's.
+
+        Only the enabled transition, and only through the runtime's own API — the
+        runtime owns what pausing means (clearing the marker, recomputing the next run).
+        """
+        return None
 
     def extract_text(self, path: Path) -> ExtractedDocument:
         """Pull readable text out of a document.

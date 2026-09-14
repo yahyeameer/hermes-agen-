@@ -81,6 +81,11 @@ HERMES_CAPABILITIES = RuntimeCapabilities(
     work_decisions=True,
     channel_delivery=True,
     brand_projection=True,
+    # Hermes holds recurring work per profile in cron/jobs.json, with its own execution
+    # ledger. True says the runtime HOLDS schedules — not that anything is running them;
+    # the ticker lives in the gateway, so liveness is asked per agent via
+    # ``scheduler_health``.
+    scheduling=True,
 )
 
 
@@ -455,6 +460,43 @@ class HermesRuntime(AgentRuntime):
         Same tenant scope as :meth:`get_task` — a foreign id is None, not a 403.
         """
         return _work.task_detail(self.paths.home, task_id, tenant_id=self.tenant_id)
+
+    # -- automations ----------------------------------------------------------
+
+    def list_automations(self, *, agent_id: str = "") -> list:
+        """Automations across this tenant's agents, or one agent's.
+
+        An automation lives in its agent's profile store, so "this tenant's" means
+        "across the profiles this deployment materialized" — there is no board-wide
+        query that could return another tenant's schedules even by accident.
+        """
+        from nova.runtime.hermes import automations as _automations
+
+        wanted = [agent_id] if agent_id else [a.agent_id for a in self.list_agents()]
+        found: list = []
+        for name in wanted:
+            profile = self.paths.profile_dir(name)
+            if not profile.is_dir():
+                continue
+            found.extend(_automations.list_automations(profile, name))
+        return found
+
+    def scheduler_health(self, agent_id: str):
+        from nova.runtime.hermes import automations as _automations
+
+        return _automations.scheduler_health(self.paths.profile_dir(agent_id))
+
+    def set_automation_enabled(
+        self, agent_id: str, automation_id: str, *, enabled: bool, reason: str = "",
+    ):
+        from nova.runtime.hermes import automations as _automations
+
+        profile = self.paths.profile_dir(agent_id)
+        if not profile.is_dir():
+            return None
+        return _automations.set_enabled(
+            profile, agent_id, automation_id, enabled=enabled, reason=reason,
+        )
 
     def health(self) -> RuntimeHealth:
         present, detail = _work.store_status(self.paths.home)

@@ -13,8 +13,10 @@ import {
   ObjectivesScreen, PoliciesScreen, UsageScreen, WorkScreen,
 } from "@/screens/misc";
 import type {
-  Agent, Budget, Channel, Decision, Health, Identity, KnowledgeSource, Objective, Policy, Task,
+  Agent, AutomationsPayload, Budget, Channel, Decision, Health, Identity, KnowledgeSource,
+  Objective, Policy, Task,
 } from "@/screens/types";
+import { AutomationsScreen } from "@/screens/automations";
 import { plural } from "@/lib/api";
 import { usePanel, useRoute, useTheme } from "@/lib/hooks";
 
@@ -28,6 +30,10 @@ const SCREEN_META: Record<string, { title: string; subtitle: string }> = {
   objectives: { title: "Objectives", subtitle: "Repeatable business processes and how far each has got." },
   work: { title: "Work", subtitle: "Everything on the board, newest first." },
   approvals: { title: "Approvals", subtitle: "What is waiting on a person, and what always will be." },
+  automations: {
+    title: "Automations",
+    subtitle: "Recurring work the runtime holds, and whether anything is running it.",
+  },
   activity: { title: "Activity", subtitle: "Every refusal and escalation the policy layer recorded. Permitted calls are not logged." },
   knowledge: { title: "Knowledge", subtitle: "The documents the workforce may quote, and who may read each." },
   channels: { title: "Channels", subtitle: "The places customers already talk, wired to the workforce." },
@@ -51,6 +57,9 @@ export default function App() {
   }>("/knowledge");
   const channels = usePanel<{ declared: boolean; channel_delivery: boolean; channels: Channel[]; catalogue: any[] }>("/channels");
   const policy = usePanel<Policy>("/policy");
+  // Bumped after a pause/resume so the list reflects the runtime at once.
+  const [automationNonce, setAutomationNonce] = React.useState(0);
+  const automations = usePanel<AutomationsPayload>("/automations", 15000, automationNonce);
   const decisions = usePanel<{ decisions: Decision[]; total?: number; counts?: Record<string, number> }>(
     // total and counts describe the whole log, not this page of it, so the timeline
     // can say how much it is not showing rather than implying 80 is all there is.
@@ -253,6 +262,12 @@ export default function App() {
             : route === "approvals" ? (
               <ApprovalsScreen tasks={taskRows} decisions={decisionRows} agents={agentRows}
                                channels={channelRows} canSeeDecisions={decisions.state === "ok"} />
+            )
+            : route === "automations" ? (
+              <AutomationsScreen
+                automations={automations}
+                onChanged={() => setAutomationNonce((n) => n + 1)}
+              />
             )
             : route === "activity" ? <ActivityScreen decisions={decisions} />
             : route === "knowledge" ? <KnowledgeScreen knowledge={knowledge} />

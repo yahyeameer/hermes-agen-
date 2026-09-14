@@ -99,3 +99,32 @@ export type TaskDetail = {
   depends_on: string[];
   blocks: string[];
 };
+
+/** GET /platform/v1/automations — recurring work the runtime holds, per agent. */
+export type AutomationRun = {
+  run_id: string; status: string; claimed_at: string;
+  started_at?: string | null; finished_at?: string | null; error: string;
+};
+export type Automation = {
+  automation_id: string; name: string; agent_id: string; agent_display_name?: string;
+  schedule_display: string; schedule_kind: string; schedule_expression: string;
+  enabled: boolean; state: string;
+  next_run_at?: string | null; last_run_at?: string | null;
+  last_status: string; last_error: string; failure_streak: number;
+  paused_reason: string; created_at?: string | null;
+  runs: AutomationRun[];
+};
+/** Whether anything is actually running an agent's schedules. `running` is "the loop
+ *  iterates"; `healthy` is "and it completes ticks without raising". */
+export type SchedulerHealth = {
+  running: boolean; healthy: boolean;
+  heartbeat_age_seconds?: number | null; success_age_seconds?: number | null;
+  last_error: string; detail: string;
+};
+export type AutomationsPayload = {
+  scheduling: boolean;
+  automations: Automation[];
+  detail?: string;
+  scheduler_health?: Record<string, SchedulerHealth>;
+  counts?: { total: number; enabled: number; paused: number };
+};

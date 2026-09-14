@@ -183,9 +183,9 @@ capabilities:
     hermes_source: cron/jobs.py
     hermes_symbol: list_jobs, get_job, JOBS_FILE, CRON_DIR
     runtime_enforcement: live_proven   # store resolution proven; scheduler loop only wired
-    nova_status: none
+    nova_status: surfaced            # Phase 11 — Automations screen
     customer_visible: true
-    customer_editable: unknown       # writes need a governance design first
+    customer_editable: partial       # pause/resume only; create/delete withheld
     required_role: admin
     tenant_safe: true                # CRON_DIR = HERMES_DIR/"cron", profile-scoped
     audit_required: true
@@ -200,7 +200,7 @@ capabilities:
     hermes_source: cron/executions.py
     hermes_symbol: executions table, latest_executions
     runtime_enforcement: wired
-    nova_status: none
+    nova_status: surfaced            # read directly; use_cron_store does NOT retarget it
     customer_visible: true
     customer_editable: false
     required_role: viewer
@@ -223,6 +223,48 @@ capabilities:
     required_role: admin
     tenant_safe: unknown
     audit_required: false
+    core_changes_required: false
+    live_validated: false
+    priority: p2
+
+  - id: cron.scheduler_liveness
+    name: Scheduler liveness
+    category: automation
+    description: >-
+      Per-profile ticker markers distinguishing "the loop is iterating" from "it is
+      completing ticks without raising". Load-bearing: Hermes runs its ticker inside the
+      gateway and has no standalone cron daemon, so a deployment can hold a correct
+      schedule that nothing executes — the runtime's own most common support report.
+    hermes_source: cron/jobs.py
+    hermes_symbol: record_ticker_heartbeat, get_ticker_heartbeat_age, get_ticker_success_age
+    runtime_enforcement: live_proven
+    nova_status: surfaced
+    customer_visible: true
+    customer_editable: false
+    required_role: viewer
+    tenant_safe: true
+    audit_required: false
+    core_changes_required: false
+    live_validated: true
+    priority: none
+
+  - id: cron.write_create_delete
+    name: Creating and deleting automations
+    category: automation
+    description: >-
+      WITHHELD. create_job/remove_job work, but creating an automation hands an agent a
+      recurring prompt that NOVA never compiled and no policy reviewed, bypassing the
+      spec -> policy -> pre_tool_call chain. Needs automations declared in the tenant
+      bundle first. See docs/audits/PHASE_11_AUTOMATIONS.md section 3.
+    hermes_source: cron/jobs.py
+    hermes_symbol: create_job, remove_job, trigger_job
+    runtime_enforcement: live_proven
+    nova_status: none
+    customer_visible: false
+    customer_editable: false
+    required_role: admin
+    tenant_safe: true
+    audit_required: true
     core_changes_required: false
     live_validated: false
     priority: p2

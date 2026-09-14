@@ -53,6 +53,10 @@ ROUTE_ROLES: Mapping[str, str] = {
     # What is connected and which agents it may reach. Readable by a viewer: it is
     # operational state, and it contains no credential — only variable names.
     "/channels": "viewer",
+    # What runs on a schedule is operational state, like the work board. The prompt an
+    # automation carries is NOT returned, so a viewer sees what runs and when, never the
+    # instruction text.
+    "/automations": "viewer",
     # Governance surfaces. What an agent may do, what it was refused, and what it spent are
     # the questions an attacker asks first and an auditor asks legitimately — same data,
     # different principal.
@@ -77,6 +81,9 @@ WRITE_ROUTES: Mapping[str, str] = {
     "/objectives/submit": "admin",
     # Making the runtime deliver declared conversations to granted agents.
     "/channels/apply": "admin",
+    # Pausing or resuming a schedule the runtime already holds. Admin: stopping a
+    # nightly reconciliation is as consequential as releasing held work.
+    "/automations/decide": "admin",
 }
 
 #: Read routes that address ONE member of a collection, e.g. ``/tasks/t_ab12``. Only the

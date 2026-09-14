@@ -36,3 +36,31 @@ export async function load<T>(path: string): Promise<Loaded<T>> {
 export function plural(n: number, one: string, many = `${one}s`) {
   return `${n} ${n === 1 ? one : many}`;
 }
+
+/** A control-plane write.
+ *
+ *  Same-origin and JSON-only, because the server requires both: it refuses a
+ *  cross-site Origin and a non-JSON content type before reading a byte. The UI is not
+ *  the thing enforcing that — it just has to speak the protocol the server enforces.
+ *
+ *  Throws on failure with the server's own message, so a caller renders what actually
+ *  went wrong instead of "something went wrong".
+ */
+export async function post<T = unknown>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(`${API}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Accept: "application/json" },
+    credentials: "same-origin",
+    body: JSON.stringify(body ?? {}),
+  });
+  let payload: any = null;
+  try {
+    payload = await response.json();
+  } catch {
+    /* a non-JSON body is reported below by status alone */
+  }
+  if (!response.ok) {
+    throw new Error(payload?.error?.message || payload?.detail || `HTTP ${response.status}`);
+  }
+  return payload as T;
+}

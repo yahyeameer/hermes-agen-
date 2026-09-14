@@ -57,7 +57,7 @@ def _write_route(tail: str) -> Optional[str]:
     """
     parts = [part for part in tail.split("/") if part]
     # Item-level: /work/<id>/decide, /objectives/<id>/submit
-    if len(parts) == 3 and parts[0] in ("work", "objectives"):
+    if len(parts) == 3 and parts[0] in ("work", "objectives", "automations"):
         return f"/{parts[0]}/{parts[2]}"
     # Collection-level: /channels/apply. Applying channels is one act over the whole
     # declaration — routes are compiled together, and a per-connection apply would leave
@@ -65,6 +65,15 @@ def _write_route(tail: str) -> Optional[str]:
     if len(parts) == 2 and parts[0] == "channels":
         return f"/{parts[0]}/{parts[1]}"
     return None
+
+
+#: What an administrator may do to an automation the runtime already holds.
+#:
+#: Pause and resume only. They move an existing, declared schedule between two states
+#: the runtime itself defines. Creating one is a different act: it hands an agent an
+#: instruction that NOVA never compiled and no policy reviewed, which is a governance
+#: hole wearing the shape of a feature.
+AUTOMATION_ACTIONS = ("pause", "resume")
 
 
 def _error(status: int, message: str, **extra: Any) -> Response:
@@ -123,6 +132,8 @@ class ControlAPI:
 
         if route == "/work/decide":
             return self._decide_work(tail, principal, payload)
+        if route == "/automations/decide":
+            return self._decide_automation(tail, principal, payload)
         if route == "/channels/apply":
             return self._apply_channels(principal, payload)
         return self._submit_objective(tail, principal, payload)
@@ -243,6 +254,8 @@ class ControlAPI:
             return self.knowledge()
         if tail == "/objectives":
             return self.objectives()
+        if tail == "/automations":
+            return self.automations()
         if tail == "/channels":
             return self.channels()
         return _error(404, f"no such route: {path}")
@@ -404,6 +417,144 @@ class ControlAPI:
                 "counts": counts,
                 "needs_attention": sum(1 for view in views if view.needs_attention),
                 "filtered_by_agent": agent_id,
+            },
+        )
+
+    def automations(self) -> Response:
+        """Recurring work the runtime holds, per agent, with whether it will actually fire.
+
+        The scheduler answer is not decoration. Hermes runs its ticker inside the gateway
+        and has no standalone cron daemon, so a deployment can hold a perfectly correct
+        schedule that nothing ever executes — the runtime's own CLI calls this their
+        most common support report. Listing schedules without saying whether a scheduler
+        is attached would present intentions as commitments.
+        """
+        if not self.runtime.capabilities.scheduling:
+            return Response(
+                200,
+                {
+                    "scheduling": False,
+                    "automations": [],
+                    "detail": (
+                        f"runtime {self.runtime.name!r} does not hold scheduled work"
+                    ),
+                },
+            )
+
+        rows = self.runtime.list_automations()
+        # Liveness is per agent because the store is: each profile keeps its own ticker
+        # markers. Asked once per agent that actually has automations, not per row.
+        agents = sorted({row.agent_id for row in rows if row.agent_id})
+        health = {
+            agent: self.runtime.scheduler_health(agent).to_dict() for agent in agents
+        }
+        # Same identity projection the Agents screen uses, so one agent is not called two
+        # different things on two screens.
+        identity = self.bundle.identity
+        display = {a.id: identity.display_name_for(a.id, a.name) for a in self.bundle.agents}
+        return Response(
+            200,
+            {
+                "scheduling": True,
+                "automations": [
+                    {**row.to_dict(), "agent_display_name": display.get(row.agent_id, row.agent_id)}
+                    for row in rows
+                ],
+                "scheduler_health": health,
+                "counts": {
+                    "total": len(rows),
+                    "enabled": sum(1 for r in rows if r.enabled),
+                    "paused": sum(1 for r in rows if not r.enabled),
+                },
+            },
+        )
+
+    def _decide_automation(
+        self, tail: str, principal, payload: Mapping[str, Any]
+    ) -> Response:
+        """Pause or resume one automation.
+
+        The owning agent is resolved here, not taken from the caller. An automation id
+        alone does not say whose it is, and asking the client to supply the pair would
+        make the client's claim part of the lookup.
+
+        Create and delete are deliberately absent: creating an automation hands an agent
+        an instruction NOVA never compiled and no policy reviewed. See
+        docs/audits/PHASE_11_AUTOMATIONS.md.
+        """
+        if not self.runtime.capabilities.scheduling:
+            return _error(
+                501,
+                f"runtime {self.runtime.name!r} does not hold scheduled work, so this "
+                "control plane will not offer a button that does nothing",
+            )
+
+        automation_id = tail[len("/automations/") :].rsplit("/", 1)[0]
+        action = str(payload.get("action") or "").strip()
+        if action not in AUTOMATION_ACTIONS:
+            return _error(
+                400,
+                f"action must be one of {', '.join(AUTOMATION_ACTIONS)}",
+                given=action or None,
+            )
+        reason = str(payload.get("reason") or "").strip()
+
+        owner = next(
+            (
+                row.agent_id
+                for row in self.runtime.list_automations()
+                if row.automation_id == automation_id
+            ),
+            None,
+        )
+        if owner is None:
+            # 404 for an automation this tenant does not own, exactly as for one that
+            # does not exist: distinguishing them confirms other tenants' ids.
+            return _error(404, f"no automation {automation_id!r}")
+
+        enabled = action == "resume"
+        correlation_id = new_correlation_id()
+        audit = self.audit.with_actor(principal.name)
+        # Written ahead of the act, so an attempt that fails midway is still on the
+        # record. "Model-visible means logged" applies to operator actions too: the
+        # thing that changes the world gets an intent row before it changes it.
+        audit.record(
+            kind="automation.decision",
+            phase="intent",
+            subject=owner,
+            correlation_id=correlation_id,
+            detail={
+                "automation_id": automation_id, "action": action,
+                "reason": reason, "actor": principal.name,
+            },
+        )
+        updated = self.runtime.set_automation_enabled(
+            owner, automation_id, enabled=enabled, reason=reason,
+        )
+        audit.record(
+            kind="automation.decision",
+            phase="committed" if updated else "failed",
+            subject=owner,
+            correlation_id=correlation_id,
+            detail={
+                "automation_id": automation_id, "action": action,
+                "enabled": bool(updated and updated.enabled), "actor": principal.name,
+            },
+        )
+        if updated is None:
+            # 409: the request was well formed and the runtime declined.
+            return Response(
+                409,
+                {
+                    "applied": False, "automation_id": automation_id, "action": action,
+                    "detail": "the runtime did not apply this transition",
+                },
+            )
+        return Response(
+            200,
+            {
+                "applied": True, "action": action, "actor": principal.name,
+                "automation": updated.to_dict(),
             },
         )
 

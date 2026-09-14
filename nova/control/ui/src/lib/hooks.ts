@@ -4,7 +4,9 @@ import { load, type Loaded } from "@/lib/api";
 /** One panel's data, refreshed on an interval, each panel independent of the others.
  *  Independent on purpose: one 403 (a viewer reading an admin route) must blank its own
  *  card and nothing else. */
-export function usePanel<T>(path: string, refreshMs = 15000): Loaded<T> {
+export function usePanel<T>(path: string, refreshMs = 15000, nonce = 0): Loaded<T> {
+  // `nonce` lets a caller re-read immediately after a write instead of waiting out the
+  // poll interval. Appended to the effect deps, so existing call sites are unaffected.
   const [state, setState] = React.useState<Loaded<T>>({ state: "loading" });
 
   React.useEffect(() => {
@@ -19,7 +21,7 @@ export function usePanel<T>(path: string, refreshMs = 15000): Loaded<T> {
       alive = false;
       window.clearInterval(id);
     };
-  }, [path, refreshMs]);
+  }, [path, refreshMs, nonce]);
 
   return state;
 }

@@ -71,12 +71,17 @@ hide its children. See §7.
 
 | Capability | Hermes evidence | Enforcement | NOVA | Customer safe? | Core change? | Priority |
 |---|---|---|---|---|---|---|
-| Cron/interval jobs | `cron/jobs.py` (`JOBS_FILE = CRON_DIR/jobs.json`, `list_jobs`, `get_job`) | live-proven | **nothing** | yes (read) | no | **P1** |
-| Per-profile cron store | `cron/jobs.py:70 CRON_DIR = HERMES_DIR/"cron"` | live-proven | n/a | yes | no | — |
-| Execution ledger | `cron/executions.py` (`executions` table: status, pid, timings, error) | wired | nothing | yes | no | **P1** |
+| Cron/interval jobs | `cron/jobs.py` (`JOBS_FILE = CRON_DIR/jobs.json`, `list_jobs`, `get_job`) | live-proven | **surfaced** (Automations, Phase 11) | yes | no | done |
+| Per-profile cron store | `cron/jobs.py:70 CRON_DIR = HERMES_DIR/"cron"` | live-proven | relied on for tenancy | yes | no | done |
+| `use_cron_store` contextvar seam | `cron/jobs.py:136` | live-proven | the read/write path | yes | no | done |
+| Pause / resume | `pause_job`, `resume_job` | live-proven | **surfaced** (admin, audited) | yes | no | done |
+| Create / delete / run-now | `create_job`, `remove_job`, `trigger_job` | live-proven | **withheld** — an ungoverned agent instruction; PHASE_11 §3 | not yet | no | P2 |
+| Ticker liveness | `record_ticker_heartbeat`, `get_ticker_heartbeat_age`, `get_ticker_success_age` | live-proven | **surfaced** — the banner | yes | no | done |
+| Execution ledger | `cron/executions.py` (`executions` table: status, pid, timings, error) | wired | surfaced (proven on seeded data only) | yes | no | done |
 | Job incidents | `cron/incidents.py` (`cron_incidents`) | wired | nothing | yes | no | P2 |
 | Delivery queue + tombstones | `cron/delivery_queue.py` | wired | nothing | operator-only | no | P3 |
-| One-shot / delayed | `cron/jobs.py` fire-claim fence, `_oneshot_run_claim_ttl_seconds` | wired | nothing | yes | no | P2 |
+| One-shot / delayed | `cron/jobs.py` fire-claim fence | wired | carried in `schedule_kind`, not distinguished in UI | yes | no | P2 |
+| **Scheduled execution actually firing** | needs a running gateway (`hermes_cli/cron.py:70`) | **wired, NOT live-proven** | reported honestly as "nothing is running these" | — | no | — |
 
 ### Memory
 
@@ -148,8 +153,9 @@ Classified per the brief: REAL / PARTIAL / DECLARED / UNSUPPORTED.
 
 Ranked by customer value × existing runtime support ÷ effort.
 
-1. **Automations (cron).** A complete scheduling engine with an execution ledger and
-   incident tracking, and NOVA shows nothing. Highest value:content ratio in the repo.
+1. ~~**Automations (cron).**~~ **Done — Phase 11**, see `PHASE_11_AUTOMATIONS.md`. The
+   audit's central caveat survived into the product: Hermes runs its ticker inside the
+   gateway, so the screen leads with whether anything is actually running the schedules.
 2. **Task detail: run history, comments, artifacts.** All three durable, all three
    already in SQLite, none surfaced. This is what makes a task page feel like a record
    rather than a status light.
@@ -166,7 +172,7 @@ Derived from what is actually surfaceable, not from a generic list. `*` = new.
 ```
 Overview        Agents        Objectives     Work
 Approvals       Activity      Knowledge      Channels
-Automations*    Artifacts*    Usage          Policies
+Automations     Artifacts*    Usage          Policies
 Health*         Settings
 ```
 
@@ -227,9 +233,10 @@ own-tenant access verified intact.
 * **Phase A — Task detail.** `/tasks/{id}` returning runs, comments, artifact metadata
   (never `stored_path`). Highest value, zero new runtime concepts, and the security fix
   in §7 is its precondition.
-* **Phase B — Automations.** Read-only `/automations` over `cron.jobs.list_jobs` +
-  `cron.executions`. Read-only first; scheduling *writes* are a governance decision
-  that needs policy design.
+* ~~**Phase B — Automations.**~~ **Shipped (Phase 11)** with pause/resume as the write
+  surface. Create/delete stay withheld pending the governance design in
+  `PHASE_11_AUTOMATIONS.md` §3 — a NOVA-created automation should be a compiled bundle
+  artifact, not free-text prompt on a schedule.
 * **Phase C — Usage depth.** Per-model/provider breakdown, estimated vs actual, using
   fields the adapter already reads.
 * **Phase D — Workforce Health.** `DispatchResult` + `release_stale_claims` +
@@ -243,7 +250,8 @@ own-tenant access verified intact.
   blocks provider egress (`inference-api.nousresearch.com`, `openrouter.ai` refused by
   the proxy). Everything marked `live-proven` was proven against the real runtime
   *libraries and databases*, not against a model call.
-* Cron **execution** was not observed end to end — `list_jobs`/store resolution was.
-  The scheduler loop is `wired`, not `live-proven`, here.
+* Cron **execution** was not observed end to end, before or after Phase 11. Reads,
+  writes, isolation and liveness reporting are live-proven; a job firing is not, and no
+  test asserts that it does. The scheduler loop remains `wired`.
 * MCP, plugin isolation and the external memory providers were mapped, not exercised.
 * `gateway/` channel internals are cited from the earlier Phase 9 audit, not re-proven.
