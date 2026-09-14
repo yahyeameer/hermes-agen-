@@ -11,12 +11,31 @@ value. An operator debugging a stuck task needs the runtime's word, not a transl
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
 from nova.runtime.base import TaskView
+
+#: When set truthy, a tenant-scoped read refuses rows that carry NO tenant at all,
+#: instead of treating them as the caller's own legacy work.
+#:
+#: The permissive default below is right for the deployment NOVA was built for: one
+#: bundle, one tenant, its own runtime home, where an unstamped row is that
+#: deployment's own pre-tenant history and hiding it would read as data loss. It is
+#: wrong the moment several tenants share one board — there an unowned row is visible
+#: to all of them, which is a cross-tenant read. Strict mode is how a multi-tenant
+#: deployment says which of the two it is. Same variable the runtime kernel uses, so a
+#: deployment turns strict tenancy on in one place.
+_STRICT_ENV_VAR = "HERMES_TENANT_STRICT"
+_TRUTHY = {"1", "true", "yes", "on"}
+
+
+def _strict_tenancy() -> bool:
+    return str(os.environ.get(_STRICT_ENV_VAR, "")).strip().lower() in _TRUTHY
+
 
 #: Runtime status -> NOVA canonical state. An unknown status maps to ``pending`` and
 #: keeps its native value, so a runtime that adds a status does not break this view.
@@ -145,8 +164,13 @@ def list_tasks(
             params.append(agent_id)
         # Rows written before the tenant was stamped carry NULL/'' and stay visible: a
         # filter that hid a deployment's own pre-existing work would read as data loss.
+        # Under strict tenancy (several tenants on one board) an unowned row belongs to
+        # nobody and is shown to nobody — see ``_strict_tenancy``.
         if tenant_id and "tenant" in available:
-            clauses.append("(tenant = ? OR tenant IS NULL OR tenant = '')")
+            if _strict_tenancy():
+                clauses.append("tenant = ?")
+            else:
+                clauses.append("(tenant = ? OR tenant IS NULL OR tenant = '')")
             params.append(tenant_id)
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
@@ -179,8 +203,15 @@ def get_task(home: Path, task_id: str, *, tenant_id: str = "") -> Optional[TaskV
     if row is None:
         return None
     view = _row_to_task(row)
-    if tenant_id and view.tenant_id and view.tenant_id != tenant_id:
-        return None
+    if tenant_id:
+        # ``view.tenant_id and ...`` short-circuited on an unstamped row, handing it to
+        # every tenant that asked. Kept as the default for the single-tenant case it was
+        # written for; refused outright under strict tenancy.
+        if view.tenant_id:
+            if view.tenant_id != tenant_id:
+                return None
+        elif _strict_tenancy():
+            return None
     return view
 
 

@@ -229,3 +229,71 @@ def test_an_unscoped_reader_still_sees_everything(tmp_path):
         assert list_tasks(home) != []
     finally:
         os.environ.pop("HERMES_HOME", None)
+
+
+# ---------------------------------------------------------------------------
+# Unowned rows under strict tenancy
+# ---------------------------------------------------------------------------
+
+def _seed_board(home, rows):
+    """Write a minimal tasks table directly: this tests the READ filter."""
+    import sqlite3
+
+    path = home / "kanban.db"
+    conn = sqlite3.connect(path)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS tasks ("
+        " id TEXT PRIMARY KEY, title TEXT, status TEXT, assignee TEXT,"
+        " created_at INTEGER, tenant TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO tasks (id, title, status, assignee, created_at, tenant)"
+        " VALUES (?, ?, 'ready', 'ops', 1, ?)", rows,
+    )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_unowned_rows_are_visible_by_default(tmp_path):
+    """The single-tenant default: an unstamped row is this deployment's own
+    pre-tenant history, and hiding it would read as data loss."""
+    from nova.runtime.hermes import work
+
+    home = tmp_path / "home"
+    home.mkdir()
+    _seed_board(home, [("t_own", "mine", "acme"), ("t_orphan", "unowned", None)])
+
+    titles = {t.title for t in work.list_tasks(home, tenant_id="acme")}
+    assert titles == {"mine", "unowned"}
+    assert work.get_task(home, "t_orphan", tenant_id="acme") is not None
+
+
+def test_strict_tenancy_hides_unowned_rows(tmp_path, monkeypatch):
+    """Several tenants on one board: a row owned by nobody is shown to nobody.
+
+    Before this, ``view.tenant_id and view.tenant_id != tenant_id`` short-circuited
+    on an unstamped row and handed it to every tenant that asked for it.
+    """
+    from nova.runtime.hermes import work
+
+    monkeypatch.setenv("HERMES_TENANT_STRICT", "1")
+    home = tmp_path / "home"
+    home.mkdir()
+    _seed_board(home, [("t_own", "mine", "acme"), ("t_orphan", "unowned", None)])
+
+    titles = {t.title for t in work.list_tasks(home, tenant_id="acme")}
+    assert titles == {"mine"}
+    assert work.get_task(home, "t_orphan", tenant_id="acme") is None
+    assert work.get_task(home, "t_own", tenant_id="acme") is not None
+
+
+def test_strict_tenancy_still_refuses_another_tenants_row(tmp_path, monkeypatch):
+    from nova.runtime.hermes import work
+
+    monkeypatch.setenv("HERMES_TENANT_STRICT", "1")
+    home = tmp_path / "home"
+    home.mkdir()
+    _seed_board(home, [("t_other", "theirs", "globex")])
+    assert work.get_task(home, "t_other", tenant_id="acme") is None
+    assert work.list_tasks(home, tenant_id="acme") == []

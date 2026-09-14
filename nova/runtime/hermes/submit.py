@@ -84,7 +84,7 @@ def submit(
                 )
             parents = tuple(by_key[key] for key in item.depends_on)
 
-            before = _existing_id(kb, connection, item.key)
+            before = _existing_id(kb, connection, item.key, item.tenant_id or "")
             task_id = kb.create_task(
                 connection,
                 title=item.title,
@@ -125,13 +125,19 @@ def submit(
     return SubmitResult(items=tuple(submitted), warnings=tuple(warnings))
 
 
-def _existing_id(kb: Any, connection: Any, key: str) -> Optional[str]:
-    """The task already carrying this idempotency key, if any.
+def _existing_id(kb: Any, connection: Any, key: str, tenant: str = "") -> Optional[str]:
+    """The task already carrying this idempotency key **for this tenant**, if any.
 
     Asked before creating so the result can distinguish "created" from "was already there".
     ``create_task`` returns the existing id either way, which is the behaviour that makes a
     re-submission safe but also makes it indistinguishable from a fresh one — and "did this
     run do anything?" is the first question an operator asks.
+
+    Scoped by tenant for the same reason the runtime's own lookup now is: an
+    idempotency key is a caller's natural name for a job, so two tenants both
+    calling one "quarterly-refund-audit:pull-ledger" is ordinary. Unscoped, this
+    probe reported another tenant's task as ours and the submission was labelled
+    "already existed" when in fact nothing of ours had ever run.
     """
     finder = getattr(kb, "find_task_by_idempotency_key", None)
     if callable(finder):
@@ -139,11 +145,17 @@ def _existing_id(kb: Any, connection: Any, key: str) -> Optional[str]:
             found = finder(connection, key)
         except Exception:  # noqa: BLE001 — a probe must never fail a submission
             return None
-        return getattr(found, "id", None) if found is not None else None
+        if found is None:
+            return None
+        # Honour the boundary even when the runtime supplies its own finder.
+        if tenant and (getattr(found, "tenant", None) or "") != tenant:
+            return None
+        return getattr(found, "id", None)
     try:
         row = connection.execute(
-            "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' LIMIT 1",
-            (key,),
+            "SELECT id FROM tasks WHERE idempotency_key = ? AND status != 'archived' "
+            "AND COALESCE(tenant, '') = COALESCE(?, '') LIMIT 1",
+            (key, tenant or None),
         ).fetchone()
     except Exception:  # noqa: BLE001 — schema differences must not fail a submission
         return None

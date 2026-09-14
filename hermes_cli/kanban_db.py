@@ -1286,16 +1286,19 @@ def create_task(
     parents = tuple(p for p in parents if p)
     skills_list = _normalize_task_skills(skills)
 
-    # Idempotency check BEFORE the write txn (no lock held); a concurrent-create
-    # race may insert twice, the next lookup stabilises on the newest.
-    if idempotency_key:
-        row = conn.execute(
-            "SELECT id FROM tasks WHERE idempotency_key = ? "
-            "AND status != 'archived' "
-            "ORDER BY created_at DESC LIMIT 1", (idempotency_key,),
-        ).fetchone()
-        if row:
-            return row["id"]
+    # The idempotency lookup used to live here — outside the write transaction,
+    # and matching on the key alone. Both were wrong:
+    #
+    #   * outside the txn, two concurrent creators both missed and both
+    #     inserted (the old comment conceded this: "may insert twice");
+    #   * keyed globally, tenant B submitting its own "nightly-export" was
+    #     handed tenant A's task id, so B's work silently never ran and B held
+    #     a live handle to A's card.
+    #
+    # It now runs inside the txn below, scoped to the RESOLVED tenant (which
+    # initial_task_state may inherit from parents), backed by a UNIQUE index so
+    # a loser of the race is rejected by the database rather than by a lookup
+    # that already went stale. See _existing_idempotent_task.
 
     now = int(time.time())
 
@@ -1314,6 +1317,10 @@ def create_task(
             # commit so the dispatcher never sees a half-built graph.
             with write_txn(conn, allow_nested=True):
                 task_status, tenant = initial_task_state(conn, parents, initial_status, triage, tenant)
+                if idempotency_key:
+                    existing = _existing_idempotent_task(conn, idempotency_key, tenant)
+                    if existing:
+                        return existing
                 # Project worktree: fresh dir under the repo + deterministic
                 # branch, instead of the random ``wt/<id>`` worker fallback.
                 if project_obj is not None and workspace_kind == "worktree":
@@ -1370,10 +1377,40 @@ def create_task(
                 inherit_creator_origin(conn, task_id, creator_task_id, created_at=now)
                 _inherit_notify_subs(conn, task_id, parents, created_at=now)
             return task_id
-        except sqlite3.IntegrityError:
+        except sqlite3.IntegrityError as exc:
+            # Two different collisions land here. A duplicate idempotency key
+            # means a concurrent creator won the race: the correct answer is
+            # ITS task id, exactly as if our lookup had seen it. Retrying with a
+            # fresh task id (the id-collision path) would insert a duplicate,
+            # which is the whole thing the key exists to prevent.
+            if "idx_tasks_idem_tenant_unique" in str(exc) and idempotency_key:
+                winner = _existing_idempotent_task(conn, idempotency_key, tenant)
+                if winner:
+                    return winner
             if attempt == 1:
                 raise
     raise RuntimeError("unreachable")
+
+
+def _existing_idempotent_task(
+    conn: sqlite3.Connection, idempotency_key: str, tenant: Optional[str]
+) -> Optional[str]:
+    """The live task already holding ``idempotency_key`` for ``tenant``, if any.
+
+    Scoped to the tenant: an idempotency key is a caller's own natural name for
+    a job ("nightly-export"), so it is only unique within the caller. Two
+    tenants choosing the same obvious string is expected, not a conflict.
+    ``COALESCE`` mirrors the unique index so the lookup and the constraint agree
+    on what "same tenant" means for untenanted boards.
+    """
+    row = conn.execute(
+        "SELECT id FROM tasks "
+        "WHERE idempotency_key = ? AND COALESCE(tenant, '') = COALESCE(?, '') "
+        "AND status != 'archived' "
+        "ORDER BY created_at DESC LIMIT 1",
+        (idempotency_key, tenant),
+    ).fetchone()
+    return row["id"] if row else None
 
 
 def _board_meta_for(board: Optional[str]) -> dict:
@@ -1445,8 +1482,61 @@ def _inherit_notify_subs(
     )
 
 
-def get_task(conn: sqlite3.Connection, task_id: str) -> Optional[Task]:
-    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+def _tenant_scope(tenant: Any = None, *, alias: str = "") -> tuple[str, tuple]:
+    """WHERE fragment restricting a task query to the operating tenant.
+
+    ``("", ())`` when nothing is bound, so single-tenant callers (the CLI, the
+    TUI, every pre-existing test) are byte-for-byte unaffected. See
+    :mod:`hermes_cli.kanban_tenant`.
+    """
+    from hermes_cli import kanban_tenant
+
+    return kanban_tenant.scope_clause(tenant, alias=alias)
+
+
+def task_visible(conn: sqlite3.Connection, task_id: str, tenant: Any = None) -> bool:
+    """Whether ``task_id`` exists *and* belongs to the operating tenant.
+
+    The guard every mutation calls before it writes. Kept separate from
+    :func:`get_task` so a caller that already holds the row can re-check
+    cheaply, and so the refusal is logged in exactly one place.
+    """
+    clause, params = _tenant_scope(tenant)
+    row = conn.execute(
+        f"SELECT 1 FROM tasks WHERE id = ?{clause}", (task_id, *params)
+    ).fetchone()
+    return row is not None
+
+
+def _guard(conn: sqlite3.Connection, task_id: str, operation: str, tenant: Any = None) -> bool:
+    """True when ``operation`` on ``task_id`` is permitted for this tenant.
+
+    On refusal the caller returns its ordinary not-found value. Answering
+    "forbidden" for a row that exists and "not found" for one that does not
+    would confirm other tenants' task ids to anyone who guessed one.
+    """
+    from hermes_cli import kanban_tenant
+
+    if kanban_tenant.current() is None and kanban_tenant.normalize(tenant) is None:
+        return True  # unscoped: historical single-tenant behaviour
+    if task_visible(conn, task_id, tenant):
+        return True
+    # Only shout when the row exists but belongs to someone else; a genuinely
+    # missing id is an ordinary miss, not a boundary event.
+    if conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone():
+        kanban_tenant.deny(operation, task_id)
+    return False
+
+
+def get_task(conn: sqlite3.Connection, task_id: str, *, tenant: Any = None) -> Optional[Task]:
+    """The task, or ``None`` — including when it belongs to another tenant.
+
+    Cross-tenant reads are indistinguishable from a missing id on purpose.
+    """
+    clause, params = _tenant_scope(tenant)
+    row = conn.execute(
+        f"SELECT * FROM tasks WHERE id = ?{clause}", (task_id, *params)
+    ).fetchone()
     return Task.from_row(row) if row else None
 
 
@@ -1472,6 +1562,12 @@ def list_tasks(
 ) -> list[Task]:
     if status is not None and status not in VALID_STATUSES:
         raise ValueError(f"status must be one of {sorted(VALID_STATUSES)}")
+    # An explicit tenant still wins (the dispatcher and admin tooling pass one
+    # deliberately); otherwise inherit the bound tenant so a listing made inside
+    # a tenant context cannot enumerate the whole board.
+    from hermes_cli import kanban_tenant
+
+    tenant = kanban_tenant.resolve(tenant)
     query = "SELECT * FROM tasks WHERE 1=1"
     params: list[Any] = []
     for col, val in (
@@ -1497,9 +1593,16 @@ def list_tasks(
     return [Task.from_row(r) for r in rows]
 
 
-def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) -> bool:
-    """Assign/reassign; raises RuntimeError while the task is running under a claim."""
+def assign_task(
+    conn: sqlite3.Connection, task_id: str, profile: Optional[str], *, tenant: Any = None
+) -> bool:
+    """Assign/reassign; raises RuntimeError while the task is running under a claim.
+
+    Returns False for a task belonging to another tenant, as for a missing one.
+    """
     profile = _canonical_assignee(profile)
+    if not _guard(conn, task_id, "assign_task", tenant):
+        return False
     with write_txn(conn):
         row = conn.execute(
             "SELECT status, claim_lock, assignee FROM tasks WHERE id = ?", (task_id,)
@@ -1682,8 +1785,9 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str) 
     with write_txn(conn, allow_nested=True):
         _require_task(conn, task_id)
         cur = conn.execute(
-            "INSERT INTO task_comments (task_id, author, body, created_at) "
-            "VALUES (?, ?, ?, ?)", (task_id, author.strip(), body.strip(), now),
+            "INSERT INTO task_comments (task_id, author, body, created_at, tenant) "
+            "VALUES (?, ?, ?, ?, (SELECT tenant FROM tasks WHERE id = ?))",
+            (task_id, author.strip(), body.strip(), now, task_id),
         )
         _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
         return int(cur.lastrowid or 0)
@@ -1791,9 +1895,10 @@ def add_attachment(
         _require_task(conn, task_id)
         cur = conn.execute(
             "INSERT INTO task_attachments "
-            "(task_id, filename, stored_path, content_type, size, uploaded_by, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (task_id, filename.strip(), stored_path, content_type, int(size), uploaded_by, now),
+            "(task_id, filename, stored_path, content_type, size, uploaded_by, created_at, tenant) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, (SELECT tenant FROM tasks WHERE id = ?))",
+            (task_id, filename.strip(), stored_path, content_type, int(size), uploaded_by, now,
+             task_id),
         )
         _append_event(
             conn, task_id, "attached",
@@ -1836,8 +1941,9 @@ def _insert_comment(
     """Raw comment INSERT for callers already inside a write txn (``add_comment``
     opens its own txn and emits ``commented``)."""
     conn.execute(
-        "INSERT INTO task_comments (task_id, author, body, created_at) "
-        "VALUES (?, ?, ?, ?)", (task_id, author, body, created_at),
+        "INSERT INTO task_comments (task_id, author, body, created_at, tenant) "
+        "VALUES (?, ?, ?, ?, (SELECT tenant FROM tasks WHERE id = ?))",
+        (task_id, author, body, created_at, task_id),
     )
 
 
@@ -1847,8 +1953,9 @@ def _append_event(
 ) -> None:
     """Insert an event row inside the caller's txn; ``run_id`` groups it by attempt (NULL = task-scoped)."""
     conn.execute(
-        "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
-        "VALUES (?, ?, ?, ?, ?)", (task_id, run_id, kind, _json_or_null(payload), int(time.time())),
+        "INSERT INTO task_events (task_id, run_id, kind, payload, created_at, tenant) "
+        "VALUES (?, ?, ?, ?, ?, (SELECT tenant FROM tasks WHERE id = ?))",
+        (task_id, run_id, kind, _json_or_null(payload), int(time.time()), task_id),
     )
 
 
@@ -1942,12 +2049,12 @@ def _synthesize_ended_run(
             task_id, profile, step_key,
             status, outcome,
             summary, error, metadata,
-            started_at, ended_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            started_at, ended_at, tenant
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, (SELECT tenant FROM tasks WHERE id = ?))
         """,
         (
             task_id, profile, step_key, outcome, outcome, summary, error, _json_or_null(metadata),
-            now, now,
+            now, now, task_id,
         ),
     )
     return int(cur.lastrowid or 0)
@@ -2110,12 +2217,12 @@ def _claim_and_open_run(
         INSERT INTO task_runs (
             task_id, profile, step_key, status,
             claim_lock, claim_expires, max_runtime_seconds,
-            started_at
-        ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?)
+            started_at, tenant
+        ) VALUES (?, ?, ?, 'running', ?, ?, ?, ?, (SELECT tenant FROM tasks WHERE id = ?))
         """,
         (
             task_id, trow["assignee"] if trow else None, trow["current_step_key"] if trow else None,
-            lock, expires, trow["max_runtime_seconds"] if trow else None, now,
+            lock, expires, trow["max_runtime_seconds"] if trow else None, now, task_id,
         ),
     )
     run_id = run_cur.lastrowid
@@ -2129,13 +2236,18 @@ def _claim_and_open_run(
 
 def claim_task(
     conn: sqlite3.Connection, task_id: str, *, ttl_seconds: Optional[int] = None,
-    claimer: Optional[str] = None,
+    claimer: Optional[str] = None, tenant: Any = None,
 ) -> Optional[Task]:
     """Atomically transition ``ready -> running``.
 
     Returns the claimed ``Task`` on success, ``None`` if the task was
-    already claimed (or is not in ``ready`` status).
+    already claimed (or is not in ``ready`` status, or belongs to another
+    tenant). The dispatcher binds no tenant — it schedules every tenant's
+    work — so this is a no-op there; it bites when a *worker* already scoped to
+    its own tenant tries to claim outside it.
     """
+    if not _guard(conn, task_id, "claim_task", tenant):
+        return None
     now = int(time.time())
     lock = claimer or _claimer_id()
     expires = now + _resolve_claim_ttl_seconds(ttl_seconds)
@@ -2530,7 +2642,7 @@ def complete_task(
     conn: sqlite3.Connection, task_id: str, *, result: Optional[str] = None,
     summary: Optional[str] = None, metadata: Optional[dict] = None,
     created_cards: Optional[Iterable[str]] = None, expected_run_id: Optional[int] = None,
-    fire_lifecycle_hook: bool = True,
+    fire_lifecycle_hook: bool = True, tenant: Any = None,
 ) -> bool:
     """``running|ready|blocked|review -> done``; records ``result``.
 
@@ -2552,6 +2664,8 @@ def complete_task(
         conn, task_id, metadata, summary=summary, result=result,
     )
     handoff_summary = summary if summary is not None else result
+    if not _guard(conn, task_id, "complete_task", tenant):
+        return False
     acceptance = prepare_acceptance(conn, task_id, expected_run_id, metadata)
     if acceptance is False:
         return False
@@ -2840,9 +2954,10 @@ def _insert_completion_attachment(
     """Record a worker-produced artifact in the existing attachment table."""
     conn.execute(
         "INSERT INTO task_attachments "
-        "(task_id, filename, stored_path, content_type, size, uploaded_by, created_at) "
-        "VALUES (?, ?, ?, NULL, ?, 'kanban_complete', ?)",
-        (task_id, filename, stored_path, size, created_at),
+        "(task_id, filename, stored_path, content_type, size, uploaded_by, created_at, tenant) "
+        "VALUES (?, ?, ?, NULL, ?, 'kanban_complete', ?, "
+        "(SELECT tenant FROM tasks WHERE id = ?))",
+        (task_id, filename, stored_path, size, created_at, task_id),
     )
     _append_event(conn, task_id, "attached", {"filename": filename, "size": size, "by": "kanban_complete"})
 
@@ -2906,12 +3021,15 @@ def edit_completed_task_result(
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
+    tenant: Any = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
     :func:`_route_block`). ``transient`` still counts toward the loop breaker
     so a forever-flaky task escalates. True on any transition."""
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
+    if not _guard(conn, task_id, "block_task", tenant):
+        return False
     with write_txn(conn):
         cur_row = conn.execute(
             "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,),
@@ -3487,7 +3605,9 @@ def specify_triage_task(
     return True
 
 
-def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def archive_task(conn: sqlite3.Connection, task_id: str, *, tenant: Any = None) -> bool:
+    if not _guard(conn, task_id, "archive_task", tenant):
+        return False
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET status = 'archived', "
@@ -3527,8 +3647,11 @@ def delete_archived_task(conn: sqlite3.Connection, task_id: str) -> bool:
         return cur.rowcount == 1
 
 
-def delete_task(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Hard-delete a task and its related rows in one txn; False when not found."""
+def delete_task(conn: sqlite3.Connection, task_id: str, *, tenant: Any = None) -> bool:
+    """Hard-delete a task and its related rows in one txn; False when not found
+    or owned by another tenant."""
+    if not _guard(conn, task_id, "delete_task", tenant):
+        return False
     with write_txn(conn):
         cur = conn.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
         if cur.rowcount != 1:
