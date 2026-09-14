@@ -35,6 +35,8 @@ import hmac
 import json
 import logging
 import mimetypes
+import signal
+import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Optional
@@ -425,9 +427,56 @@ def serve(
     if ready is not None:
         scheme = "https" if tls_certfile else "http"
         ready(f"{scheme}://{bound_host}:{bound_port}/")
+    restore = _install_shutdown_handlers(server)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        restore()
         server.server_close()
+
+
+def _install_shutdown_handlers(server: ThreadingHTTPServer):
+    """Stop serving on SIGTERM, and return a callable that undoes this.
+
+    Ctrl-C was already handled — ``serve_forever`` raises ``KeyboardInterrupt`` — but
+    SIGTERM was not, and SIGTERM is how every process supervisor asks a service to stop:
+    systemd, Kubernetes, ``docker stop``. Worse, a container's main process runs as PID 1,
+    and the kernel does not apply default signal dispositions to PID 1. Without an explicit
+    handler the signal is *ignored*, the supervisor waits out its grace period, and the
+    process is killed with SIGKILL — in-flight requests dropped, sockets never closed.
+    That was observable: ``docker stop`` took the full 30-second timeout and reported exit
+    code 137 every time.
+
+    ``shutdown()`` blocks until the serving loop stops, so calling it from the handler —
+    which runs on the main thread, the thread inside ``serve_forever`` — would deadlock.
+    It goes on a thread of its own instead, which is the documented way to do this.
+
+    Handlers are only installed when this is the main thread; ``signal.signal`` raises
+    anywhere else, and a test or an embedding application that serves on a worker thread
+    should keep the host process's signal handling rather than have it taken over.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return lambda: None
+
+    previous = {}
+
+    def _stop(signum, _frame):
+        logger.info("received %s — shutting down", signal.Signals(signum).name)
+        threading.Thread(target=server.shutdown, name="nova-shutdown", daemon=True).start()
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        try:
+            previous[signum] = signal.signal(signum, _stop)
+        except (OSError, ValueError):  # pragma: no cover — platform without this signal
+            pass
+
+    def _restore() -> None:
+        for signum, handler in previous.items():
+            try:
+                signal.signal(signum, handler)
+            except (OSError, ValueError):  # pragma: no cover
+                pass
+
+    return _restore

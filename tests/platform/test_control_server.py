@@ -262,3 +262,60 @@ def test_dashboard_has_no_external_dependencies():
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     assert not re.search(r'(src|href)\s*=\s*["\']https?://', html), "external resource referenced"
     assert "cdn" not in html.lower()
+
+
+# --- graceful shutdown -------------------------------------------------------------
+#
+# A production container's main process is PID 1, and the kernel applies no default signal
+# dispositions to PID 1. A server that does not install a SIGTERM handler therefore ignores
+# SIGTERM outright: every `docker stop` waits out its grace period and ends in SIGKILL, with
+# in-flight requests dropped. That was the observed behaviour before
+# `_install_shutdown_handlers` existed, so these tests pin it.
+
+
+def test_sigterm_stops_the_serving_loop(api):
+    """SIGTERM ends `serve_forever` rather than being ignored."""
+    import os
+    import signal
+    import time
+
+    from nova.control.server import _install_shutdown_handlers
+
+    server = build_server(api, host="127.0.0.1", port=0)
+    before = signal.getsignal(signal.SIGTERM)
+    restore = _install_shutdown_handlers(server)
+    try:
+        assert signal.getsignal(signal.SIGTERM) is not before, "no handler was installed"
+        serving = threading.Thread(target=server.serve_forever, daemon=True)
+        serving.start()
+        # Let the loop enter its poll before signalling it.
+        time.sleep(0.1)
+        os.kill(os.getpid(), signal.SIGTERM)
+        serving.join(timeout=5)
+        assert not serving.is_alive(), "SIGTERM did not stop serve_forever"
+    finally:
+        restore()
+        server.server_close()
+
+    assert signal.getsignal(signal.SIGTERM) is before, "the previous handler was not restored"
+
+
+def test_shutdown_handlers_are_not_installed_off_the_main_thread(api):
+    """An embedding application that serves on a worker keeps its own signal handling."""
+    import signal
+
+    from nova.control.server import _install_shutdown_handlers
+
+    server = build_server(api, host="127.0.0.1", port=0)
+    before = signal.getsignal(signal.SIGTERM)
+    result: dict[str, object] = {}
+
+    thread = threading.Thread(target=lambda: result.update(restore=_install_shutdown_handlers(server)))
+    thread.start()
+    thread.join()
+    server.server_close()
+
+    assert signal.getsignal(signal.SIGTERM) is before
+    # Still returns a callable, so a caller's `finally: restore()` needs no special case.
+    assert callable(result["restore"])
+    result["restore"]()
